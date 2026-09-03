@@ -205,6 +205,18 @@ def extract_benchmark_items(raw_bench: Dict[str, Any], metric: str) -> Tuple[Lis
     return items, weighted_prices
 
 
+def load_catalog_pricing(force_refresh: bool = False) -> Dict[str, Any]:
+    """Fetch catalog pricing from /api/v1/models (cached)."""
+    catalog, _ = load_data_concurrent(force_refresh=force_refresh)
+    return catalog
+
+
+def load_benchmarks(api_key: Optional[str] = None, metric: str = "intelligence", force_refresh: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """Load benchmark data and optional weighted input prices (cached)."""
+    _, raw_bench = load_data_concurrent(api_key=api_key, force_refresh=force_refresh)
+    return extract_benchmark_items(raw_bench, metric)
+
+
 def compute_pareto(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Compute Pareto frontier given items with 'cost' and 'score'.
 
