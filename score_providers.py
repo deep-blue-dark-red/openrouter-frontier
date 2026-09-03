@@ -162,8 +162,8 @@ def print_table(
     show_failures = price_failures
 
     cols = [
-        ("Score", 10, ">"),
         ("Provider", 16, "<"),
+        ("Scored Cost", 12, ">"),
         ("Token Cost", 11, ">"),
     ]
     if show_time:
@@ -200,8 +200,8 @@ def print_table(
 
     for r in results:
         row_vals = [
-            f"${r.total_cost_usd:.6f}",
             r.provider_name,
+            f"${r.total_cost_usd:.6f}",
             f"${r.token_cost_usd:.6f}",
         ]
         if show_time:
