@@ -251,8 +251,11 @@ def main():
 
     args = parser.parse_args()
 
+    from openrouter_analytics.resolver import resolve_model
+    model_id, canonical_slug, display_name = resolve_model(args.model)
+
     results = score_model(
-        model=args.model,
+        model=canonical_slug,
         prompt_tokens=args.prompt_tokens,
         completion_tokens=args.completion_tokens,
         time_value_usd_per_hour=args.time_value,
@@ -268,7 +271,7 @@ def main():
 
     print_table(
         results[:args.top],
-        model_name=args.model,
+        model_name=f"{display_name} ({model_id})",
         prompt_tokens=args.prompt_tokens,
         completion_tokens=args.completion_tokens,
         time_value=args.time_value,
