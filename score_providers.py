@@ -146,6 +146,95 @@ def score_model(
     return score_model_providers(model, config=config)
 
 
+def print_table(
+    results: List[ScoreResult],
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    time_value: float,
+    prior: float,
+    prior_weight: float,
+    price_failures: bool,
+    discounts_applied: bool = True,
+):
+    """Prints a clean, modern table using connected dashes and space separation (no vertical bars, no ===)."""
+    show_time = time_value > 0
+    show_failures = price_failures
+
+    cols = [
+        ("Rank", 4, ">"),
+        ("Provider", 16, "<"),
+        ("Total Cost", 11, ">"),
+        ("Token Cost", 11, ">"),
+    ]
+    if show_time:
+        cols.append(("Time Cost", 11, ">"))
+    if show_failures:
+        cols.append(("Fail Risk", 10, ">"))
+    cols.extend([
+        ("h(used)", 8, ">"),
+        ("h(pub)", 7, ">"),
+        ("Hit $/M", 8, ">"),
+        ("Miss $/M", 9, ">"),
+        ("Latency", 8, ">"),
+        ("TPS", 5, ">"),
+        ("Uptime", 7, ">"),
+    ])
+
+    header_parts = [f"{name:>{w}}" if a == ">" else f"{name:<{w}}" for name, w, a in cols]
+    header_line = "  ".join(header_parts)
+    divider = "─" * len(header_line)
+
+    mode = "Pure Token Cost" if time_value == 0 and not price_failures else "Full Utility Model"
+    banner_info = (
+        f"Mode: {mode}  •  Turn: {prompt_tokens} prompt + {completion_tokens} completion tokens  •  Time Value: ${time_value:.2f}/hr\n"
+        f"Shrinkage: prior={prior * 100:.0f}%, weight={prior_weight / 1e9:.1f}B tokens  •  Discounts: {'Applied' if discounts_applied else 'List Price'}  •  Failure Risk: {'Yes' if price_failures else 'No'}"
+    )
+
+    print()
+    print(divider)
+    print(f"ProviderUtility Evaluation: {model_name}")
+    print(banner_info)
+    print(divider)
+    print(header_line)
+    print(divider)
+
+    for r in results:
+        row_vals = [
+            f"#{r.rank}",
+            r.provider_name,
+            f"${r.total_cost_usd:.6f}",
+            f"${r.token_cost_usd:.6f}",
+        ]
+        if show_time:
+            row_vals.append(f"${r.time_cost_usd:.6f}")
+        if show_failures:
+            row_vals.append(f"${r.failure_cost_usd:.6f}")
+
+        lat_str = f"{r.ttft_seconds:.2f}s" if r.ttft_seconds else "--"
+        tps_str = f"{r.throughput_tps:.0f}" if r.throughput_tps else "--"
+        upt_str = f"{r.uptime_pct:.1f}%" if r.uptime_pct else "--"
+
+        row_vals.extend([
+            f"{r.h_used * 100.0:.1f}%",
+            f"{r.h_raw * 100.0:.1f}%",
+            f"${r.hit_price:.4f}",
+            f"${r.miss_price:.4f}",
+            lat_str,
+            tps_str,
+            upt_str,
+        ])
+
+        row_str = "  ".join(
+            f"{val:>{w}}" if a == ">" else f"{val:<{w}}"
+            for val, (_, w, a) in zip(row_vals, cols)
+        )
+        print(row_str)
+
+    print(divider)
+    print("Lower Total Cost represents higher utility. Ranks include cache hit rates, shrinkage, and endpoint metrics.\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate OpenRouter providers using ProviderUtility scoring model.",
@@ -179,45 +268,17 @@ def main():
         print(json.dumps([r.to_dict() for r in results[:args.top]], indent=2))
         return
 
-    mode = "Pure Token Cost" if args.time_value == 0 and args.no_failures else "Full Utility Model"
-    print(f"\n" + "=" * 122)
-    print(f" ProviderUtility Evaluation: {args.model}")
-    print(f" Mode: {mode} | Turn: {args.prompt_tokens} prompt + {args.completion_tokens} completion tokens | Time Value: ${args.time_value:.2f}/hr")
-    print(f" Shrinkage: prior={args.prior * 100:.0f}%, weight={args.prior_weight/1e9:.1f}B tokens | Failure Risk: {'No' if args.no_failures else 'Yes'}")
-    print("=" * 122)
-
-    header = (
-        f"{'Rank':>4} | {'Provider':<16} | {'Total Cost':>10} | {'Token Cost':>10} | "
-        f"{'Time Cost':>10} | {'Fail Risk':>9} | {'h(used)':>7} | {'h(pub)':>6} | "
-        f"{'Hit $/M':>7} | {'Miss $/M':>8} | {'Latency':>7} | {'TPS':>6} | {'Uptime':>6}"
+    print_table(
+        results[:args.top],
+        model_name=args.model,
+        prompt_tokens=args.prompt_tokens,
+        completion_tokens=args.completion_tokens,
+        time_value=args.time_value,
+        prior=args.prior,
+        prior_weight=args.prior_weight,
+        price_failures=not args.no_failures,
+        discounts_applied=not args.no_discount,
     )
-    print(header)
-    print("-" * 122)
-
-    for r in results[:args.top]:
-        lat_str = f"{r.ttft_seconds:.2f}s" if r.ttft_seconds else "--"
-        tps_str = f"{r.throughput_tps:.0f}" if r.throughput_tps else "--"
-        upt_str = f"{r.uptime_pct:.1f}%" if r.uptime_pct else "--"
-
-        row = (
-            f"#{r.rank:>3} | {r.provider_name:<16} | "
-            f"${r.total_cost_usd:>9.6f} | "
-            f"${r.token_cost_usd:>9.6f} | "
-            f"${r.time_cost_usd:>9.6f} | "
-            f"${r.failure_cost_usd:>8.6f} | "
-            f"{r.h_used * 100.0:>6.1f}% | "
-            f"{r.h_raw * 100.0:>5.1f}% | "
-            f"${r.hit_price:>6.4f} | "
-            f"${r.miss_price:>7.4f} | "
-            f"{lat_str:>7} | "
-            f"{tps_str:>6} | "
-            f"{upt_str:>6}"
-        )
-        print(row)
-
-    print("=" * 122)
-    print(" Lower Total Cost represents higher utility. Ranks include cache hit rates, shrinkage, and endpoint metrics.\n")
-
 
 if __name__ == "__main__":
     main()
