@@ -130,43 +130,43 @@ io.net               $0.000459    $0.000445     1.76s     11     43.8%    86.8% 
 
 ---
 
-### 3. `model_provider_frontier.py` — Catalog-Wide Model Pareto Frontier
+### 4. `model_frontier.py` — Benchmark-Driven Model Pareto Frontier
 
-Computes the multi-objective Pareto efficiency frontier across all **400+ models** in OpenRouter's catalog, finding optimal trade-offs between **Turn Cost**, **Context Window Size**, and **Cache Read Pricing**.
+Computes the Cost vs. Quality Pareto efficiency frontier using live Artificial Analysis quality benchmark scores against OpenRouter catalog pricing. Detects non-dominated models, calculates normalized marginal efficiency, and highlights the **Knee Point** (maximum quality gain per dollar).
 
 ```bash
-# View Pareto-optimal models across the entire catalog
-./model_provider_frontier.py --optimal-only
+# View Intelligence Pareto Frontier with Knee point
+./model_frontier.py
 
-# Filter to a specific model family (e.g. Flash, Claude, Qwen)
-./model_provider_frontier.py -q flash --optimal-only
+# Evaluate Coding Benchmark Index
+./model_frontier.py --metric coding
 
-# Output raw JSON
-./model_provider_frontier.py --json
+# Evaluate Agentic Index using traffic-weighted pricing
+./model_frontier.py --metric agentic --price-source weighted
+
+# Output full JSON
+./model_frontier.py --format json
 ```
 
 #### Example Output:
 
 ```text
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-OpenRouter Catalog-Wide Model Pareto Frontier
-Multi-Objective Pareto Analysis  •  Turn: 2000 prompt + 500 completion tokens
-Evaluation: Turn Cost vs Context Length vs Cache Read Pricing  •  14 Pareto-Optimal Models
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Model ID                              Turn Cost  Prompt $/M   Compl $/M   Read $/M     Context  Frontier      Niche / Advantage           
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-mistralai/mistral-nemo                $0.000053     $0.0190     $0.0300         --        131k  ★ OPTIMAL     Cheapest Model              
-inclusionai/ling-3.0-flash            $0.000073     $0.0210     $0.0630    $0.0042        262k  ★ OPTIMAL     Cost/Context Trade-off      
-nex-agi/nex-n2-mini                   $0.000100     $0.0250     $0.1000    $0.0025        262k  ★ OPTIMAL     Cost/Context Trade-off      
-upstage/solar-pro4                    $0.000120     $0.0300     $0.1200    $0.0060        524k  ★ OPTIMAL     Cost/Context Trade-off      
-qwen/qwen3.7-flash                    $0.000125     $0.0300     $0.1300    $0.0060       1000k  ★ OPTIMAL     1M Context                  
-openai/gpt-5-nano:batch               $0.000150     $0.0250     $0.2000    $0.0025        400k  ★ OPTIMAL     Cost/Context Trade-off      
-~deepseek/deepseek-v4-flash-latest    $0.000180     $0.0500     $0.1600    $0.0130       1310k  ★ OPTIMAL     1M Context                  
-google/gemini-2.5-flash-lite:batch    $0.000200     $0.0500     $0.2000    $0.0100       1048k  ★ OPTIMAL     1M Context                  
-poolside/laguna-s-2.1                 $0.000270     $0.0900     $0.1800    $0.0090       1048k  ★ OPTIMAL     1M Context                  
-meta/muse-spark-1.3-contributor       $0.000300     $0.1000     $0.2000    $0.0020       1048k  ★ OPTIMAL     1M Context • Cheapest Cache Read
-x-ai/grok-4.20                        $0.003750     $1.2500     $2.5000    $0.2000       2000k  ★ OPTIMAL     Max Context (2000k)         
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+OpenRouter Pareto Frontier [INTELLIGENCE] (8 non-dominated of 87 models)
+Price metric: LIST ($/1M prompt)
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+MODEL                                                     ID                                Intelligence Score  Cost ($/1M prompt)  STATUS        
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Ling 3.0 Flash                                            inclusionai/ling-3.0-flash                37.8             $0.02  ON FRONTIER   
+Solar Pro 4                                               upstage/solar-pro4                        41.6             $0.03  ON FRONTIER   
+GLM-5.3-Flash                                             z-ai/glm-5.3-flash                        57.5             $0.07  ← KNEE        
+Gemini 3.8 Flash (high)                                   google/gemini-3.8-flash                   58.7             $0.75  ON FRONTIER   
+GLM-5.3 (max)                                             z-ai/glm-5.3                              59.5             $1.40  ON FRONTIER   
+GPT-5.6 Sol (max)                                         openai/gpt-5.6-sol                        60.9             $2.00  ON FRONTIER   
+Claude Opus 5 (Adaptive Reasoning, Max Effort)            anthropic/claude-opus-5                   63.1             $5.00  ON FRONTIER   
+Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Defaul  anthropic/claude-fable-5.1                65.7            $10.00  ON FRONTIER   
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+← KNEE indicates the optimal trade-off point with maximum quality score gain per dollar.
 ```
 
 ---
@@ -217,32 +217,156 @@ Slug:  z-ai/glm-5.3-flash-20260826
 
 ---
 
-## ProviderUtility Scoring Mathematical Model
+## Pareto Frontiers
 
-### 1. Token Cost Term
-$$\text{tokenCost} = \frac{C \cdot \left( h_{used} \cdot \text{hitPrice} + (1 - h_{used}) \cdot \text{missPrice} \right) + O \cdot \text{out}}{1{,}000{,}000} + \text{requestFee}$$
+This section provides the rigorous mathematical formulation, objective spaces, Bayesian models, and algorithms used to compute both the **Model Pareto Frontier** (Intelligence/Coding Quality vs. Token Cost) and the **Provider Pareto Frontier & Provider Utility Scorer** (Turn Cost, Latency, TPS, Cache Hit Rate, and Reliability).
 
-- **Inputs** (USD per million tokens, scaled from endpoints API):
-  - $\text{in} = \text{pricing.prompt}$ (input price)
-  - $\text{out} = \text{pricing.completion}$ (output price)
-  - $\text{read} = \text{pricing.input\_cache\_read}$ (absent if caching unsupported)
-  - $\text{write} = \text{pricing.input\_cache\_write}$ (absent if billed as input)
-- **Derived Prices**:
-  - $\text{hitPrice} = \text{read} \text{ if present else } \text{in}$
-  - $\text{missPrice} = \text{in} \text{ if read absent else } (\text{write} \text{ if present else } \text{in})$
-  - $h = 0 \text{ if read absent else } \text{clamp}(\text{cacheHitRate}, 0, 1)$
-- **Bayesian Shrinkage**:
-  $$h_{used} = \frac{h \cdot T + \text{prior} \cdot W}{T + W}$$
-  where $T$ is the endpoint's observed 24h total tokens, $\text{prior} = 0.5$ (default), and $W = 10^9$ tokens ($1\text{B}$ tokens, default).
+---
 
-### 2. Utility Terms (Time Opportunity Cost & Failure Risk)
-$$\text{timeCost} = \left(\frac{\text{TimeValueUsdPerHour}}{3600}\right) \cdot \left(\text{ttft} + \frac{O}{\text{throughput}}\right)$$
+### 1. Model Pareto Frontier: Quality vs. Cost
 
-$$\text{failureCost} = (1 - \text{uptime}) \cdot \left[ \frac{C \cdot h_{used} \cdot (\text{missPrice} - \text{hitPrice})}{1{,}000{,}000} + \left(\frac{\text{TimeValueUsdPerHour}}{3600}\right) \cdot \text{ttft} \right]$$
+The model Pareto frontier identifies non-dominated LLMs balancing empirical benchmark intelligence/coding capability against token pricing.
 
-$$\text{totalCost} = \text{tokenCost} + \text{timeCost} + \text{failureCost}$$
+#### 1.1 Objective Dimensions
+Given a set of candidate models $\mathcal{M} = \{m_1, m_2, \dots, m_N\}$, each model is mapped to a two-dimensional performance coordinate:
 
-*Setting `TimeValueUsdPerHour = 0` and `PriceFailures = false` evaluates the pure token cost model.*
+1. **Cost Metric $c(m)$ (Minimize $\downarrow$)**:
+   - **Catalog List Price**: $c(m) = P_{\text{prompt}}(m)$ in USD per 1M input tokens.
+   - **Traffic-Weighted Effective Price**: $c(m) = P_{\text{weighted}}(m)$ derived from production routing volume.
+   - **Standard Turn Price**: $c(m) = \frac{C \cdot P_{\text{prompt}} + O \cdot P_{\text{completion}}}{1{,}000{,}000}$ for a standardized turn of $C$ prompt and $O$ completion tokens.
+
+2. **Quality Benchmark Index $s(m)$ (Maximize $\uparrow$)**:
+   Sourced from OpenRouter's live Artificial Analysis benchmark rankings (`/api/frontend/v1/rankings/benchmarks`):
+   - **Intelligence Index** $\in [0, 100]$: General reasoning, knowledge retrieval, and math/logic synthesis.
+   - **Coding Index** $\in [0, 100]$: Code generation, syntax instruction following, and debugging accuracy.
+   - **Agentic Index** $\in [0, 100]$: Tool calling, multi-step environment planning, and goal execution.
+
+#### 1.2 Mathematical Formulation of Pareto Dominance
+A candidate model $A$ **strictly dominates** candidate model $B$ ($A \succ B$) if and only if $A$ achieves equal or lower cost while achieving equal or higher quality, with at least one strict inequality:
+$$A \succ B \iff \big(c(A) \le c(B) \land s(A) \ge s(B)\big) \land \big(c(A) < c(B) \lor s(A) > s(B)\big)$$
+
+The **Pareto Frontier** $\mathcal{F}$ is the non-dominated subset of $\mathcal{M}$:
+$$\mathcal{F} = \{m \in \mathcal{M} \mid \nexists \, m' \in \mathcal{M} \text{ such that } m' \succ m\}$$
+
+#### 1.3 Upper-Hull Monotonic Sweep Algorithm
+The frontier is extracted in $O(N \log N)$ time:
+1. Filter out invalid candidates where $c_i \le 0$ or $s_i \le 0$.
+2. Sort candidates by cost ascending; break cost ties by score descending:
+   $$\mathcal{M}_{\text{sorted}} = \text{sort}\Big(\mathcal{M}, \ \text{key} = \big(c(m), -s(m)\big)\Big)$$
+3. Perform a linear sweep tracking the running maximum score $s_{\max}$:
+   - Initialize $s_{\max} \leftarrow -\infty$, $\mathcal{F} \leftarrow []$.
+   - For each model $m \in \mathcal{M}_{\text{sorted}}$:
+     $$\text{If } s(m) > s_{\max}: \quad \mathcal{F} \leftarrow \mathcal{F} \cup \{m\}, \quad s_{\max} \leftarrow s(m)$$
+   Because cost is monotonically non-decreasing, any candidate with a quality score strictly greater than all preceding cheaper models is guaranteed to be non-dominated.
+
+#### 1.4 Knee Point Detection (Maximum Marginal Efficiency)
+The **Knee Point** identifies the model on the frontier providing the maximum normalized quality gain per dollar before diminishing returns set in:
+
+1. Identify the boundary endpoints of the frontier:
+   $$\text{Cheapest Anchor: } (c_{\min}, s_{\min}) = \mathcal{F}[0], \qquad \text{Highest Quality Anchor: } (c_{\max}, s_{\max}) = \mathcal{F}[-1]$$
+
+2. Normalize cost and score coordinates into the unit square $[0, 1]^2$:
+   $$\tilde{c}_i = \frac{c_i - c_{\min}}{c_{\max} - c_{\min}}, \qquad \tilde{s}_i = \frac{s_i - s_{\min}}{s_{\max} - s_{\min}}$$
+
+3. Compute the perpendicular elevation above the linear chord connecting $(0, 0)$ to $(1, 1)$, which corresponds to the marginal advantage:
+   $$\text{Gain}_i = \tilde{s}_i - \tilde{c}_i$$
+
+4. The Knee Point $k^*$ is the frontier model maximizing this marginal gain:
+   $$k^* = \arg\max_{i \in \mathcal{F}} (\tilde{s}_i - \tilde{c}_i)$$
+
+*Example*: On the OpenRouter Intelligence frontier, **GLM-5.3-Flash** achieves $\text{Score} = 57.5$ at $c = \$0.075 / \text{1M}$, yielding $\text{Gain} = 0.697$—the global maximum across all 87 models.
+
+#### 1.5 Quality Deficit for Dominated Models
+For any dominated model $d \notin \mathcal{F}$, its distance to the frontier measures the intelligence/coding score forfeited compared to the best available alternative at or below its price point:
+$$\text{Dist}(d) = \max_{\{f \in \mathcal{F} \mid c(f) \le c(d)\}} s(f) - s(d)$$
+
+Models are ranked in the TUI by:
+1. $\text{On Frontier}$ models first (ordered by cost ascending).
+2. $\text{Dominated}$ models next (ordered by distance to frontier $\text{Dist}(d)$ ascending).
+
+---
+
+### 2. Provider Scoring Mathematical Model
+
+When a model is chosen, its execution can be routed to multiple independent host endpoints. The **ProviderUtility** framework computes the true economic cost per turn for each provider, accounting for prompt caching economics, Bayesian shrinkage, network latency, token throughput, and service reliability.
+
+#### 2.1 Standard Turn Simulation Parameters
+- $C$: Number of prompt (input) tokens (default: 2,000).
+- $O$: Number of completion (output) tokens (default: 500).
+- $V_{\text{hour}}$: Opportunity value of user/agent time in USD/hour (default: $0.00/hr; e.g., $60.00/hr for engineering agents).
+- $V_{\text{sec}} = \frac{V_{\text{hour}}}{3600}$: Time value per second.
+
+#### 2.2 Token Pricing & Effective Cache Rates
+For an endpoint with published pricing per million tokens:
+- $P_{\text{in}}$: Prompt price ($\text{pricing.prompt}$).
+- $P_{\text{out}}$: Completion price ($\text{pricing.completion}$).
+- $P_{\text{read}}$: Cache read price ($\text{pricing.input\_cache\_read}$).
+- $P_{\text{write}}$: Cache write price ($\text{pricing.input\_cache\_write}$).
+
+Derived operational prices:
+$$P_{\text{hit}} = \begin{cases} P_{\text{read}} & \text{if caching supported} \\ P_{\text{in}} & \text{otherwise} \end{cases}$$
+$$P_{\text{miss}} = \begin{cases} P_{\text{in}} & \text{if caching unsupported} \\ P_{\text{write}} & \text{if write fee specified} \\ P_{\text{in}} & \text{otherwise} \end{cases}$$
+
+#### 2.3 Bayesian Empirical Shrinkage of Cache Hit Rates
+Published 24-hour cache hit rates $h_{\text{raw}}$ can fluctuate or suffer from sparse sample sizes on low-traffic endpoints. To prevent optimistic bias on unproven providers, we apply an empirical Bayes shrinkage estimator toward an uninformative prior:
+$$h_{\text{used}} = \frac{h_{\text{raw}} \cdot T + \text{Prior} \cdot W}{T + W}$$
+where:
+- $T$: Endpoint observed 24h token volume.
+- $\text{Prior} = 0.50$ ($50\%$ prior expectation).
+- $W = 10^9$ tokens ($1\text{B}$ pseudo-observation weight).
+
+As an endpoint logs billions of tokens ($T \gg W$), $h_{\text{used}} \to h_{\text{raw}}$. For low-volume endpoints ($T \to 0$), $h_{\text{used}}$ safely shrinks toward $50\%$.
+
+#### 2.4 Token Cost Component
+$$\text{TokenCost} = \frac{C \cdot \left[ h_{\text{used}} \cdot P_{\text{hit}} + (1 - h_{\text{used}}) \cdot P_{\text{miss}} \right] + O \cdot P_{\text{out}}}{1{,}000{,}000} + \text{Fee}_{\text{request}}$$
+
+#### 2.5 Time Opportunity Cost Component
+Total turn turnaround time includes Time to First Token ($\text{TTFT}$) plus streaming duration:
+$$\text{Duration} = \text{TTFT} + \frac{O}{\text{Throughput}_{\text{TPS}}}$$
+$$\text{TimeCost} = V_{\text{sec}} \cdot \text{Duration} = \left(\frac{V_{\text{hour}}}{3600}\right) \cdot \left(\text{TTFT} + \frac{O}{\text{TPS}}\right)$$
+
+#### 2.6 Failure Risk Penalty Component
+When a request fails, the turn must be retried on an alternate endpoint:
+1. Cache locality is broken: the prompt tokens must be re-sent as an un-cached cache-miss, forfeiting the cache discount.
+2. Latency is doubled: the client paid the $\text{TTFT}$ delay without receiving tokens.
+
+With endpoint availability rate $U = \text{clamp}(\text{uptime}, 0.5, 1.0)$ and failure probability $P_{\text{fail}} = 1 - U$:
+$$\text{FailureCost} = (1 - U) \cdot \left[ \frac{C \cdot h_{\text{used}} \cdot (P_{\text{miss}} - P_{\text{hit}})}{1{,}000{,}000} + V_{\text{sec}} \cdot \text{TTFT} \right]$$
+
+#### 2.7 Total Scored Turn Cost
+$$\text{ScoredCost} = \text{TokenCost} + \text{TimeCost} + \text{FailureCost}$$
+Endpoints are sorted in ascending order of $\text{ScoredCost}$. The rank #1 provider delivers the strictly optimal turn utility.
+
+---
+
+### 3. Multi-Objective Provider Pareto Frontier
+
+Rather than assuming a single time-value parameter $V_{\text{hour}}$, `provider_frontier.py` performs multi-objective Pareto optimization across 5 concurrent operational dimensions.
+
+#### 3.1 Objective Vector
+Each provider endpoint $p$ is mapped to a 5-dimensional performance tuple:
+$$\mathbf{v}(p) = \big(\text{ScoredCost}(p), \ \text{TTFT}(p), \ -\text{TPS}(p), \ -h_{\text{used}}(p), \ -\text{Uptime}(p)\big)$$
+where minimization is applied uniformly across all 5 coordinates (negating objectives that seek maximization).
+
+#### 3.2 Dominance Criterion
+Provider $p_1$ dominates provider $p_2$ ($p_1 \succ p_2$) if and only if $p_1$ is at least as good in all 5 dimensions and strictly superior in at least one:
+$$\begin{cases}
+\text{ScoredCost}(p_1) \le \text{ScoredCost}(p_2) \\
+\text{TTFT}(p_1) \le \text{TTFT}(p_2) \\
+\text{TPS}(p_1) \ge \text{TPS}(p_2) \\
+h_{\text{used}}(p_1) \ge h_{\text{used}}(p_2) \\
+\text{Uptime}(p_1) \ge \text{Uptime}(p_2)
+\end{cases}$$
+with at least one strict inequality.
+
+#### 3.3 Frontier Classification & Niche Advantages
+Endpoints in the non-dominated set $\mathcal{P}^*$ are classified as **★ OPTIMAL** and tagged with their specialized operational niche:
+- **Lowest Cost**: Achieves $\min_{p} \text{ScoredCost}(p)$.
+- **Lowest Latency**: Achieves $\min_{p} \text{TTFT}(p)$.
+- **Highest TPS**: Achieves $\max_{p} \text{TPS}(p)$.
+- **Best Cache Hit**: Achieves $\max_{p} h_{\text{used}}(p)$.
+- **Highest Uptime**: Achieves $\max_{p} \text{Uptime}(p)$.
+- **Balanced Trade-off**: Non-dominated generalist offering strong multi-criteria compromise.
 
 ---
 
