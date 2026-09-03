@@ -1,0 +1,153 @@
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+
+
+def format_tokens(n: int) -> str:
+    """Format token count in human-readable compact notation (B, M, K)."""
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+@dataclass
+class ProviderStats:
+    endpoint_id: str
+    name: str
+    slug: str
+    effective_input_price: float   # in $ per million tokens
+    effective_output_price: float  # in $ per million tokens
+    cache_hit_rate: float          # 0.0 to 1.0
+    total_tokens: int
+    token_share: float = 0.0       # 0.0 to 1.0 relative to model total
+
+    @property
+    def cache_hit_rate_pct(self) -> float:
+        return self.cache_hit_rate * 100.0
+
+    @property
+    def formatted_cache_hit_rate(self) -> str:
+        return f"{self.cache_hit_rate * 100.0:.1f}%"
+
+    @property
+    def formatted_input_price(self) -> str:
+        return f"${self.effective_input_price:.4f} /M"
+
+    @property
+    def formatted_output_price(self) -> str:
+        return f"${self.effective_output_price:.4f} /M"
+
+    @property
+    def formatted_tokens(self) -> str:
+        return format_tokens(self.total_tokens)
+
+    @property
+    def formatted_token_share(self) -> str:
+        return f"{self.token_share * 100.0:.1f}%"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "endpoint_id": self.endpoint_id,
+            "name": self.name,
+            "slug": self.slug,
+            "cache_hit_rate": self.cache_hit_rate,
+            "cache_hit_rate_pct": round(self.cache_hit_rate_pct, 2),
+            "effective_input_price_per_m": self.effective_input_price,
+            "effective_output_price_per_m": self.effective_output_price,
+            "total_tokens": self.total_tokens,
+            "token_share": round(self.token_share, 4),
+            "token_share_pct": round(self.token_share * 100.0, 2),
+        }
+
+
+@dataclass
+class ModelStats:
+    model_id: str
+    permaslug: str
+    model_name: Optional[str]
+    providers: List[ProviderStats]
+    weighted_cache_hit_rate: float
+    weighted_input_price: float
+    weighted_output_price: float
+    total_tokens: int
+    input_chart_data: List[Dict[str, Any]]
+    output_chart_data: List[Dict[str, Any]]
+
+    @property
+    def provider_count(self) -> int:
+        return len(self.providers)
+
+    @property
+    def formatted_weighted_cache_hit_rate(self) -> str:
+        return f"{self.weighted_cache_hit_rate * 100.0:.1f}%"
+
+    @property
+    def formatted_weighted_input_price(self) -> str:
+        return f"${self.weighted_input_price:.4f} /M"
+
+    @property
+    def formatted_weighted_output_price(self) -> str:
+        return f"${self.weighted_output_price:.4f} /M"
+
+    @property
+    def formatted_total_tokens(self) -> str:
+        return format_tokens(self.total_tokens)
+
+    def get_provider(self, query: str) -> Optional[ProviderStats]:
+        """Find a provider by name, slug, or substring match."""
+        q = query.strip().lower()
+        # 1. Exact match on slug or name
+        for p in self.providers:
+            if p.slug.lower() == q or p.name.lower() == q:
+                return p
+        # 2. Substring match
+        for p in self.providers:
+            if q in p.slug.lower() or q in p.name.lower():
+                return p
+        return None
+
+    def sort_by(self, field: str = "cache", descending: bool = True) -> List[ProviderStats]:
+        """
+        Sort providers by:
+        - 'cache' or 'hit_rate': cache hit rate
+        - 'input_price': effective input price
+        - 'output_price': effective output price
+        - 'tokens' or 'volume': total tokens served
+        - 'share': token share
+        - 'name': provider name
+        """
+        f = field.lower()
+        if f in ("cache", "cache_hit_rate", "hit_rate"):
+            key = lambda p: p.cache_hit_rate
+        elif f in ("input_price", "input"):
+            key = lambda p: p.effective_input_price
+        elif f in ("output_price", "output"):
+            key = lambda p: p.effective_output_price
+        elif f in ("tokens", "volume", "total_tokens"):
+            key = lambda p: p.total_tokens
+        elif f in ("share", "token_share"):
+            key = lambda p: p.token_share
+        elif f in ("name", "provider"):
+            key = lambda p: p.name.lower()
+            return sorted(self.providers, key=key, reverse=not descending)
+        else:
+            key = lambda p: p.cache_hit_rate
+
+        return sorted(self.providers, key=key, reverse=descending)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "model_id": self.model_id,
+            "permaslug": self.permaslug,
+            "model_name": self.model_name,
+            "provider_count": self.provider_count,
+            "total_tokens": self.total_tokens,
+            "weighted_cache_hit_rate": self.weighted_cache_hit_rate,
+            "weighted_cache_hit_rate_pct": round(self.weighted_cache_hit_rate * 100.0, 2),
+            "weighted_input_price_per_m": self.weighted_input_price,
+            "weighted_output_price_per_m": self.weighted_output_price,
+            "providers": [p.to_dict() for p in self.providers],
+        }
