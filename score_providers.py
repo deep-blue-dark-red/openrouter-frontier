@@ -147,7 +147,7 @@ def score_model(
 
 
 def print_table(
-    results: List[ScoreResult],
+    results: List[ScoreBreakdown],
     model_name: str,
     prompt_tokens: int,
     completion_tokens: int,
