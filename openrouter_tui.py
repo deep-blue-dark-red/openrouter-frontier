@@ -432,7 +432,7 @@ def run_tui():
                         s.provider_name[:16],
                         f"${s.total_cost_usd:.6f}",
                         f"${s.token_cost_usd:.6f}",
-                        f"${s.failure_risk_cost_usd:.6f}",
+                        f"${s.failure_cost_usd:.6f}",
                         f"{s.h_used * 100:.1f}%",
                         lat_str,
                         tps_str,
@@ -530,7 +530,7 @@ def run_tui():
                 sys.stdout.write(divider + "\n")
                 sys.stdout.write(f"  Scored Cost per Turn:   \x1b[1;32m${p_stat.total_cost_usd:.6f}\x1b[0m\n")
                 sys.stdout.write(f"  Token Cost per Turn:    ${p_stat.token_cost_usd:.6f}\n")
-                sys.stdout.write(f"  Failure Risk Penalty:   ${p_stat.failure_risk_cost_usd:.6f}\n")
+                sys.stdout.write(f"  Failure Risk Penalty:   ${p_stat.failure_cost_usd:.6f}\n")
                 sys.stdout.write(f"  Time Opportunity Cost:  ${p_stat.time_cost_usd:.6f}\n")
                 sys.stdout.write(f"  Prompt Cache Hit Rate:  Used: \x1b[1m{p_stat.h_used * 100:.1f}%\x1b[0m  (Observed 24h: {p_stat.h_raw * 100:.1f}%)\n")
                 sys.stdout.write(f"  Cache Read (Hit) Price: ${p_stat.hit_price:.4f} / M tokens\n")

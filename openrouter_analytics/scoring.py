@@ -106,8 +106,13 @@ class ScoreBreakdown:
     uptime_pct: Optional[float] = None
     ttft_seconds: Optional[float] = None
     throughput_tps: Optional[float] = None
+    out_price: float = 0.0
     quantization: str = "unknown"
     rank: int = 0
+
+    @property
+    def failure_risk_cost_usd(self) -> float:
+        return self.failure_cost_usd
 
     @property
     def formatted_token_cost(self) -> str:
@@ -264,5 +269,6 @@ def evaluate_endpoint(
         uptime_pct=uptime_pct,
         ttft_seconds=ttft_seconds,
         throughput_tps=throughput_tps,
+        out_price=out,
         quantization=quantization,
     )
