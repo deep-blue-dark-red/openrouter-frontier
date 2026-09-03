@@ -241,9 +241,8 @@ def score_command(
     )
 
     table = Table(show_header=True, header_style="bold magenta", border_style="dim")
-    table.add_column("Rank", style="dim", justify="right", width=4)
+    table.add_column("Score", style="bold green", justify="right", no_wrap=True)
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Total Cost/Turn", justify="right", style="bold green")
     table.add_column("Token Cost", justify="right")
     if time_value > 0:
         table.add_column("Time Cost", justify="right")
@@ -259,9 +258,8 @@ def score_command(
 
     for s in scores:
         row = [
-            f"#{s.rank}",
-            s.provider_name,
             f"${s.total_cost_usd:.6f}",
+            s.provider_name,
             f"${s.token_cost_usd:.6f}",
         ]
         if time_value > 0:
