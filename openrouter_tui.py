@@ -214,7 +214,7 @@ def run_tui():
                 elif selected_idx >= scroll_offset + num_visible:
                     scroll_offset = max(0, selected_idx - num_visible + 1)
 
-                total_lines = num_visible + 6
+                total_lines = num_visible + 5
 
                 if not first_draw:
                     sys.stdout.write(f"\x1b[{last_total_lines}A\r")
@@ -330,7 +330,6 @@ def run_tui():
                                         if clicked_idx == selected_idx:
                                             selected_model_dict = filtered_models[selected_idx]
                                             current_view = "PROVIDERS"
-                                            first_draw = True
                                         else:
                                             selected_idx = clicked_idx
                     except Exception:
@@ -344,7 +343,6 @@ def run_tui():
                     if filtered_models:
                         selected_model_dict = filtered_models[selected_idx]
                         current_view = "PROVIDERS"
-                        first_draw = True
                         provider_selected_idx = 0
                         provider_scroll_offset = 0
                 elif key in ("\x1b", "\x03"):  # Esc / Ctrl-C
@@ -386,7 +384,7 @@ def run_tui():
                 elif provider_selected_idx >= provider_scroll_offset + num_visible:
                     provider_scroll_offset = max(0, provider_selected_idx - num_visible + 1)
 
-                total_lines = num_visible + 6
+                total_lines = num_visible + 5
 
                 if not first_draw:
                     sys.stdout.write(f"\x1b[{last_total_lines}A\r")
@@ -502,11 +500,9 @@ def run_tui():
                 elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D"):
                     current_view = "MODELS"
                     provider_scores = []
-                    first_draw = True
                 elif key in ("\r", "\n"):
                     if active_scores:
                         current_view = "DETAIL"
-                        first_draw = True
                 elif key == "\x03":
                     break
 
@@ -515,7 +511,7 @@ def run_tui():
             # ==================================================================
             elif current_view == "DETAIL":
                 p_stat = active_scores[provider_selected_idx]
-                lines_to_draw = 16
+                lines_to_draw = 13
 
                 if not first_draw:
                     sys.stdout.write(f"\x1b[{last_total_lines}A\r")
@@ -543,14 +539,13 @@ def run_tui():
                 q_str = getattr(p_stat, "quantization", "unknown")
                 sys.stdout.write(f"  Quantization Variant:   {q_str.upper()}\n")
                 sys.stdout.write(divider + "\n")
-                sys.stdout.write("\x1b[2mPress any key, Esc, or Enter to return to providers table...\x1b[0m\n")
+                sys.stdout.write("\x1b[2mPress any key, Esc, or Enter to return to providers table...\x1b[0m")
                 sys.stdout.flush()
 
                 key = get_key()
                 if key == "\x03":
                     break
                 current_view = "PROVIDERS"
-                first_draw = True
 
     finally:
         sys.stdout.write(f"\x1b[{last_total_lines}A\r\x1b[J\x1b[?1000l\x1b[?1006l\x1b[?25h")
