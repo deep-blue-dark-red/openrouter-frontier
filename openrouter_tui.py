@@ -423,7 +423,7 @@ def run_tui():
                     ("Scored Cost", 12, ">"),
                     ("Token Cost", 11, ">"),
                     ("Fail Risk", 10, ">"),
-                    ("h(used)", 8, ">"),
+                    ("CacheHit", 8, ">"),
                     ("Latency", 8, ">"),
                     ("TPS", 5, ">"),
                     ("Uptime", 7, ">"),

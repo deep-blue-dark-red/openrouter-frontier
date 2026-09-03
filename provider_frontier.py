@@ -238,7 +238,7 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, C
         ("Token Cost", 11, ">"),
         ("Latency", 8, ">"),
         ("TPS", 5, ">"),
-        ("h(used)", 8, ">"),
+        ("CacheHit", 8, ">"),
         ("Uptime", 7, ">"),
         ("Pareto Frontier", 15, "<"),
         ("Niche / Advantage", 32, "<"),

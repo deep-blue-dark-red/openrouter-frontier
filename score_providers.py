@@ -171,7 +171,7 @@ def print_table(
     if show_failures:
         cols.append(("Fail Risk", 10, ">"))
     cols.extend([
-        ("h(used)", 8, ">"),
+        ("CacheHit", 8, ">"),
         ("h(pub)", 7, ">"),
         ("Hit $/M", 8, ">"),
         ("Miss $/M", 9, ">"),

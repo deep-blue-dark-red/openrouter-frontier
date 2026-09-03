@@ -75,7 +75,7 @@ ProviderUtility Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Mode: Full Utility Model  •  Turn: 2000 prompt + 500 completion tokens  •  Time Value: $0.00/hr
 Shrinkage: prior=50%, weight=1.0B tokens  •  Discounts: Applied  •  Failure Risk: Yes
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider           Scored Cost   Token Cost   Fail Risk   h(used)   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
+Provider           Scored Cost   Token Cost   Fail Risk   CacheHit   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Z.ai                 $0.000086    $0.000085   $0.000002     87.9%    88.0%   $0.0075    $0.0375     4.68s     26    96.7%
 NovitaAI             $0.000091    $0.000090   $0.000001     79.0%    79.6%   $0.0075    $0.0375     1.59s     39    98.9%
@@ -108,7 +108,7 @@ Pareto Frontier Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Multi-Objective Pareto Analysis  •  Turn: 2000 prompt + 500 completion tokens
 Evaluation: Cost vs Latency vs TPS vs Cache vs Uptime  •  Quantization: FP8
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider           Scored Cost   Token Cost   Latency    TPS   h(used)   Uptime  Pareto Frontier  Niche / Advantage               
+Provider           Scored Cost   Token Cost   Latency    TPS   CacheHit   Uptime  Pareto Frontier  Niche / Advantage               
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Z.ai                 $0.000086    $0.000085     4.68s     26     87.9%    96.7%  ★ OPTIMAL        Lowest Cost • Best Cache Hit    
 NovitaAI             $0.000091    $0.000090     1.59s     39     79.0%    98.9%  ★ OPTIMAL        Balanced Trade-off              
