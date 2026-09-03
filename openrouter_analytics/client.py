@@ -1,4 +1,6 @@
-from typing import Optional, List, Dict, Any
+import re
+import json
+from typing import Optional, List, Dict, Any, Tuple
 import requests
 
 from .models import ProviderStats, ModelStats
@@ -11,18 +13,85 @@ class OpenRouterAnalyticsError(Exception):
 
 
 class OpenRouterAnalytics:
-    """Client for querying OpenRouter stats, cache hit rates, and effective pricing."""
+    """Client for querying OpenRouter stats, cache hit rates, latency, TPS, and uptime."""
 
     BASE_FRONTEND_URL = "https://openrouter.ai/api/frontend/v1"
     BASE_API_URL = "https://openrouter.ai/api/v1"
+    BASE_SITE_URL = "https://openrouter.ai"
 
-    def __init__(self, management_key: Optional[str] = None, user_agent: str = "openrouter-analytics-python/0.1"):
+    def __init__(self, management_key: Optional[str] = None, user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"):
         self.management_key = management_key
         self.headers = {"User-Agent": user_agent}
 
+    def _fetch_endpoint_performance(self, model_id: str, canonical_slug: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
+        """
+        Extract latency, throughput (TPS), and uptime for endpoints.
+        Attempts to read from model page RSC flight data, falling back to public endpoints API.
+        """
+        stats_by_endpoint: Dict[str, Dict[str, Any]] = {}
+        uptime_by_endpoint: Dict[str, float] = {}
+
+        # 1. Try fetching model page flight data (contains p50 latency, p50 throughput, uptime)
+        for slug_candidate in (model_id, canonical_slug):
+            url = f"{self.BASE_SITE_URL}/models/{slug_candidate}"
+            try:
+                resp = requests.get(url, headers=self.headers, timeout=10)
+                if resp.status_code == 200:
+                    html = resp.text
+                    rsc_raw = ""
+                    for m in re.finditer(r'self\.__next_f\.push\(\[\d+,\"(.*)\"\]\)', html):
+                        chunk = m.group(1)
+                        try:
+                            rsc_raw += json.loads('"' + chunk + '"')
+                        except Exception:
+                            pass
+
+                    # Extract stats (latency, throughput)
+                    for m in re.finditer(r'\"stats\":(\{[^}]+\})', rsc_raw):
+                        try:
+                            s = json.loads(m.group(1))
+                            ep_id = s.get("endpoint_id")
+                            if ep_id and ep_id not in stats_by_endpoint:
+                                stats_by_endpoint[ep_id] = s
+                        except Exception:
+                            pass
+
+                    # Extract uptime data
+                    for m in re.finditer(r'\"([a-f0-9\-]{36})\":\[(\{\"date\":[^\]]+\})\]', rsc_raw):
+                        ep_id = m.group(1)
+                        try:
+                            arr = json.loads("[" + m.group(2) + "]")
+                            valid = [x["uptime"] for x in arr if x.get("uptime") is not None]
+                            if valid and ep_id not in uptime_by_endpoint:
+                                uptime_by_endpoint[ep_id] = valid[0]
+                        except Exception:
+                            pass
+
+                    if stats_by_endpoint:
+                        break
+            except Exception:
+                pass
+
+        # 2. Fallback to public endpoints API if uptime or stats missing
+        if not uptime_by_endpoint:
+            ep_url = f"{self.BASE_API_URL}/models/{canonical_slug}/endpoints"
+            try:
+                resp = requests.get(ep_url, headers=self.headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json().get("data", {})
+                    for ep in data.get("endpoints", []):
+                        ep_tag = ep.get("tag") or ep.get("name")
+                        upt = ep.get("uptime_last_1d")
+                        if upt is not None and ep_tag:
+                            uptime_by_endpoint[ep_tag] = upt
+            except Exception:
+                pass
+
+        return stats_by_endpoint, uptime_by_endpoint
+
     def get_model_stats(self, model: str) -> ModelStats:
         """
-        Fetch full 24h stats (cache hit rates, effective pricing, tokens served)
+        Fetch full 24h stats (cache hit rates, effective pricing, latency, TPS, uptime, tokens)
         for all providers serving the requested model.
 
         :param model: Model name, ID, or slug (e.g. 'z-ai/glm-5.3-flash', 'glm-5.3-flash').
@@ -30,11 +99,12 @@ class OpenRouterAnalytics:
         """
         model_id, canonical_slug, display_name = resolve_model(model)
 
-        url = f"{self.BASE_FRONTEND_URL}/stats/effective-pricing"
+        # 1. Fetch effective pricing and cache hit rates
+        pricing_url = f"{self.BASE_FRONTEND_URL}/stats/effective-pricing"
         params = {"permaslug": canonical_slug, "shape": "v7"}
 
         try:
-            resp = requests.get(url, params=params, headers=self.headers, timeout=15)
+            resp = requests.get(pricing_url, params=params, headers=self.headers, timeout=15)
             resp.raise_for_status()
             res_data = resp.json().get("data", {})
         except Exception as e:
@@ -43,13 +113,41 @@ class OpenRouterAnalytics:
         raw_summaries = res_data.get("providerSummaries", [])
         total_tokens_all = sum(s.get("totalTokens", 0) for s in raw_summaries)
 
+        # 2. Fetch endpoint performance (latency, throughput, uptime)
+        stats_map, uptime_map = self._fetch_endpoint_performance(model_id, canonical_slug)
+
         providers: List[ProviderStats] = []
+        valid_latencies = []
+        valid_tps = []
+        valid_uptimes = []
+
         for s in raw_summaries:
+            ep_id = s.get("endpointId", "")
             p_tokens = s.get("totalTokens", 0)
             token_share = (p_tokens / total_tokens_all) if total_tokens_all > 0 else 0.0
+
+            # Merge latency and throughput
+            perf = stats_map.get(ep_id, {})
+            lat_p50 = perf.get("p50_latency")
+            lat_p90 = perf.get("p90_latency")
+            tps_p50 = perf.get("p50_throughput")
+            tps_p90 = perf.get("p90_throughput")
+
+            # Merge uptime (check ep_id or providerSlug)
+            upt = uptime_map.get(ep_id)
+            if upt is None:
+                upt = uptime_map.get(s.get("providerSlug", ""))
+
+            if lat_p50 is not None:
+                valid_latencies.append(lat_p50)
+            if tps_p50 is not None:
+                valid_tps.append(tps_p50)
+            if upt is not None:
+                valid_uptimes.append(upt)
+
             providers.append(
                 ProviderStats(
-                    endpoint_id=s.get("endpointId", ""),
+                    endpoint_id=ep_id,
                     name=s.get("providerName", "Unknown"),
                     slug=s.get("providerSlug", ""),
                     effective_input_price=s.get("effectiveInputPrice", 0.0),
@@ -57,8 +155,17 @@ class OpenRouterAnalytics:
                     cache_hit_rate=s.get("cacheHitRate", 0.0),
                     total_tokens=p_tokens,
                     token_share=token_share,
+                    latency_p50_ms=lat_p50,
+                    latency_p90_ms=lat_p90,
+                    throughput_p50_tps=tps_p50,
+                    throughput_p90_tps=tps_p90,
+                    uptime_1d_pct=upt,
                 )
             )
+
+        avg_lat = sum(valid_latencies) / len(valid_latencies) if valid_latencies else None
+        avg_tps = sum(valid_tps) / len(valid_tps) if valid_tps else None
+        avg_upt = sum(valid_uptimes) / len(valid_uptimes) if valid_uptimes else None
 
         return ModelStats(
             model_id=model_id,
@@ -71,6 +178,9 @@ class OpenRouterAnalytics:
             total_tokens=total_tokens_all,
             input_chart_data=res_data.get("inputChartData", []),
             output_chart_data=res_data.get("outputChartData", []),
+            avg_latency_p50_ms=avg_lat,
+            avg_throughput_p50_tps=avg_tps,
+            avg_uptime_1d_pct=avg_upt,
         )
 
     def get_provider_stats(self, model: str, provider: str) -> Optional[ProviderStats]:
@@ -91,14 +201,9 @@ class OpenRouterAnalytics:
         dimensions: Optional[List[str]] = None,
         granularity: str = "day",
     ) -> Dict[str, Any]:
-        """
-        Query account-specific analytics using an OpenRouter Management Key.
-        Requires management_key to be set.
-        """
+        """Query account-specific analytics using an OpenRouter Management Key."""
         if not self.management_key:
-            raise OpenRouterAnalyticsError(
-                "A Management API Key is required to query private account analytics."
-            )
+            raise OpenRouterAnalyticsError("A Management API Key is required to query private account analytics.")
 
         url = f"{self.BASE_API_URL}/analytics/query"
         headers = {
@@ -134,11 +239,11 @@ _default_client = OpenRouterAnalytics()
 
 
 def get_model_stats(model: str) -> ModelStats:
-    """Convenience function: Get all provider stats and cache hit rates for a model."""
+    """Get all provider stats, cache hit rates, latency, TPS, and uptime for a model."""
     return _default_client.get_model_stats(model)
 
 
 def get_cache_hit_rate(model: str, provider: str) -> Optional[float]:
-    """Convenience function: Get just the cache hit rate (0.0 to 1.0) for a model and provider."""
+    """Get cache hit rate (0.0 to 1.0) for a model and provider."""
     p = _default_client.get_provider_stats(model, provider)
     return p.cache_hit_rate if p else None

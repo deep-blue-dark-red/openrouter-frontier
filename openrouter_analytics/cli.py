@@ -24,21 +24,66 @@ def _color_hit_rate(rate_pct: float) -> Text:
         return Text(text, style="red")
 
 
+def _color_latency(lat_ms: Optional[float], text: str) -> Text:
+    if lat_ms is None:
+        return Text(text, style="dim")
+    if lat_ms < 1000:
+        return Text(text, style="bold green")
+    elif lat_ms < 2500:
+        return Text(text, style="green")
+    elif lat_ms < 5000:
+        return Text(text, style="yellow")
+    else:
+        return Text(text, style="red")
+
+
+def _color_tps(tps: Optional[float], text: str) -> Text:
+    if tps is None:
+        return Text(text, style="dim")
+    if tps >= 60:
+        return Text(text, style="bold green")
+    elif tps >= 30:
+        return Text(text, style="green")
+    elif tps >= 15:
+        return Text(text, style="yellow")
+    else:
+        return Text(text, style="red")
+
+
+def _color_uptime(upt_pct: Optional[float], text: str) -> Text:
+    if upt_pct is None:
+        return Text(text, style="dim")
+    if upt_pct >= 99.0:
+        return Text(text, style="bold green")
+    elif upt_pct >= 95.0:
+        return Text(text, style="green")
+    elif upt_pct >= 85.0:
+        return Text(text, style="yellow")
+    else:
+        return Text(text, style="red")
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
-    """OpenRouter Analytics: Inspect 24h provider stats, cache hit rates, and effective prices."""
+    """OpenRouter Analytics: Inspect 24h provider stats, cache hit rates, latency, TPS, and uptime."""
     pass
 
 
 @main.command(name="stats")
 @click.argument("model", required=True)
 @click.option("--provider", "-p", default=None, help="Filter to a specific provider (name or slug).")
-@click.option("--sort", "-s", default="cache", type=click.Choice(["cache", "input", "output", "tokens", "share", "name"]), help="Sort column.")
+@click.option(
+    "--sort",
+    "-s",
+    default="cache",
+    type=click.Choice(["cache", "latency", "tps", "uptime", "input", "output", "tokens", "share", "name"]),
+    help="Sort column (default: cache)."
+)
 @click.option("--top", "-n", default=None, type=int, help="Limit output to top N providers.")
 @click.option("--json-output", "--json", is_flag=True, help="Output raw JSON.")
 def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[int], json_output: bool):
-    """View 24h provider usage, cache hit rate, and pricing for a model."""
+    """View 24h provider performance (cache hit, latency, TPS, uptime, pricing) for a model."""
     try:
         stats = get_model_stats(model)
     except Exception as e:
@@ -72,7 +117,7 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
             f"Canonical Permaslug: [bold yellow]{stats.permaslug}[/bold yellow]\n"
             f"Providers: [bold]{stats.provider_count}[/bold] | "
             f"Total Tokens (Today): [bold]{stats.formatted_total_tokens}[/bold] | "
-            f"Weighted Cache Hit Rate: [bold green]{stats.formatted_weighted_cache_hit_rate}[/bold green]",
+            f"Weighted Cache Hit: [bold green]{stats.formatted_weighted_cache_hit_rate}[/bold green]",
             title="OpenRouter 24h Model & Provider Analytics",
             border_style="cyan"
         )
@@ -81,9 +126,12 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
     table = Table(show_header=True, header_style="bold magenta", border_style="dim")
     table.add_column("#", style="dim", justify="right", width=3)
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Cache Hit", justify="right")
-    table.add_column("Input ($/M)", justify="right")
-    table.add_column("Output ($/M)", justify="right")
+    table.add_column("Cache", justify="right")
+    table.add_column("Latency", justify="right")
+    table.add_column("TPS", justify="right")
+    table.add_column("Uptime", justify="right")
+    table.add_column("Input", justify="right")
+    table.add_column("Output", justify="right")
     table.add_column("Tokens", justify="right")
     table.add_column("Share", justify="right")
 
@@ -92,6 +140,9 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
             str(idx),
             p.name,
             _color_hit_rate(p.cache_hit_rate_pct),
+            _color_latency(p.latency_p50_ms, p.formatted_latency),
+            _color_tps(p.throughput_p50_tps, p.formatted_tps),
+            _color_uptime(p.uptime_1d_pct, p.formatted_uptime),
             p.formatted_input_price,
             p.formatted_output_price,
             p.formatted_tokens,
@@ -102,8 +153,11 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
         table.add_section()
         table.add_row(
             "—",
-            "[bold italic]Weighted Average[/bold italic]",
+            "[bold italic]Summary / Avg[/bold italic]",
             _color_hit_rate(stats.weighted_cache_hit_rate * 100.0),
+            _color_latency(stats.avg_latency_p50_ms, stats.formatted_avg_latency),
+            _color_tps(stats.avg_throughput_p50_tps, stats.formatted_avg_tps),
+            _color_uptime(stats.avg_uptime_1d_pct, stats.formatted_avg_uptime),
             stats.formatted_weighted_input_price,
             stats.formatted_weighted_output_price,
             stats.formatted_total_tokens,
@@ -111,7 +165,7 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
         )
 
     console.print(table)
-    console.print("[dim]Data represents observed effective usage today (UTC) across OpenRouter.[/dim]\n")
+    console.print("[dim]Data represents observed effective usage today (UTC) and live endpoint metrics across OpenRouter.[/dim]\n")
 
 
 @main.command(name="cache")
@@ -119,7 +173,7 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
 @click.argument("provider", required=False)
 @click.option("--json-output", "--json", is_flag=True, help="Output raw JSON.")
 def cache_command(model: str, provider: Optional[str], json_output: bool):
-    """Quick lookup of cache hit rate for a model (and optional provider)."""
+    """Quick lookup of cache hit rate, latency, TPS, and uptime for a provider."""
     try:
         stats = get_model_stats(model)
     except Exception as e:
@@ -140,25 +194,29 @@ def cache_command(model: str, provider: Optional[str], json_output: bool):
         console.print(f"[bold cyan]Model:[/bold cyan] {stats.model_name} ({stats.model_id})")
         console.print(f"[bold cyan]Provider:[/bold cyan] {p.name} ({p.slug})")
         console.print(f"[bold cyan]24h Cache Hit Rate:[/bold cyan] {_color_hit_rate(p.cache_hit_rate_pct)}")
+        console.print(f"[bold cyan]Latency (p50):[/bold cyan] {_color_latency(p.latency_p50_ms, p.formatted_latency)}")
+        console.print(f"[bold cyan]Throughput (p50):[/bold cyan] {_color_tps(p.throughput_p50_tps, p.formatted_tps)}")
+        console.print(f"[bold cyan]Uptime (24h):[/bold cyan] {_color_uptime(p.uptime_1d_pct, p.formatted_uptime)}")
         console.print(f"[bold cyan]Effective Input Price:[/bold cyan] {p.formatted_input_price}")
         console.print(f"[bold cyan]Effective Output Price:[/bold cyan] {p.formatted_output_price}")
         console.print(f"[bold cyan]Tokens Served:[/bold cyan] {p.formatted_tokens} ({p.formatted_token_share} share)")
         console.print()
     else:
-        # Show all ranked by cache hit rate
         providers = stats.sort_by("cache")
         if json_output:
             click.echo(json.dumps([p.to_dict() for p in providers], indent=2))
             return
 
         console.print()
-        console.print(f"[bold cyan]24h Cache Hit Rates for {stats.model_name}:[/bold cyan]")
+        console.print(f"[bold cyan]24h Providers for {stats.model_name}:[/bold cyan]")
         for idx, p in enumerate(providers, 1):
             console.print(
-                f"  {idx:2d}. [bold white]{p.name:20}[/bold white] "
-                f"Hit Rate: {_color_hit_rate(p.cache_hit_rate_pct)} "
-                f"| Input: {p.formatted_input_price} "
-                f"| Volume: {p.formatted_tokens}"
+                f"  {idx:2d}. [bold white]{p.name:18}[/bold white] "
+                f"Cache: {_color_hit_rate(p.cache_hit_rate_pct)} "
+                f"| Latency: {_color_latency(p.latency_p50_ms, p.formatted_latency)} "
+                f"| TPS: {_color_tps(p.throughput_p50_tps, p.formatted_tps)} "
+                f"| Up: {_color_uptime(p.uptime_1d_pct, p.formatted_uptime)} "
+                f"| Input: {p.formatted_input_price}"
             )
         console.print()
 
@@ -167,7 +225,7 @@ def cache_command(model: str, provider: Optional[str], json_output: bool):
 @click.argument("model", required=True)
 @click.argument("providers", nargs=-1, required=True)
 def compare_command(model: str, providers: List[str]):
-    """Compare multiple providers side by side for a given model."""
+    """Compare multiple providers side by side (cache, latency, TPS, uptime, price)."""
     try:
         stats = get_model_stats(model)
     except Exception as e:
@@ -188,9 +246,12 @@ def compare_command(model: str, providers: List[str]):
 
     table = Table(title=f"Provider Comparison for {stats.model_name}", header_style="bold magenta")
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Cache Hit", justify="right")
-    table.add_column("Input ($/M)", justify="right")
-    table.add_column("Output ($/M)", justify="right")
+    table.add_column("Cache", justify="right")
+    table.add_column("Latency", justify="right")
+    table.add_column("TPS", justify="right")
+    table.add_column("Uptime", justify="right")
+    table.add_column("Input", justify="right")
+    table.add_column("Output", justify="right")
     table.add_column("Tokens (24h)", justify="right")
     table.add_column("Share", justify="right")
 
@@ -198,6 +259,9 @@ def compare_command(model: str, providers: List[str]):
         table.add_row(
             p.name,
             _color_hit_rate(p.cache_hit_rate_pct),
+            _color_latency(p.latency_p50_ms, p.formatted_latency),
+            _color_tps(p.throughput_p50_tps, p.formatted_tps),
+            _color_uptime(p.uptime_1d_pct, p.formatted_uptime),
             p.formatted_input_price,
             p.formatted_output_price,
             p.formatted_tokens,

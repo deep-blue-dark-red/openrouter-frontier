@@ -24,6 +24,13 @@ class ProviderStats:
     total_tokens: int
     token_share: float = 0.0       # 0.0 to 1.0 relative to model total
 
+    # Latency, Throughput (TPS), and Uptime
+    latency_p50_ms: Optional[float] = None
+    latency_p90_ms: Optional[float] = None
+    throughput_p50_tps: Optional[float] = None
+    throughput_p90_tps: Optional[float] = None
+    uptime_1d_pct: Optional[float] = None
+
     @property
     def cache_hit_rate_pct(self) -> float:
         return self.cache_hit_rate * 100.0
@@ -34,11 +41,11 @@ class ProviderStats:
 
     @property
     def formatted_input_price(self) -> str:
-        return f"${self.effective_input_price:.4f} /M"
+        return f"${self.effective_input_price:.4f}"
 
     @property
     def formatted_output_price(self) -> str:
-        return f"${self.effective_output_price:.4f} /M"
+        return f"${self.effective_output_price:.4f}"
 
     @property
     def formatted_tokens(self) -> str:
@@ -47,6 +54,26 @@ class ProviderStats:
     @property
     def formatted_token_share(self) -> str:
         return f"{self.token_share * 100.0:.1f}%"
+
+    @property
+    def formatted_latency(self) -> str:
+        if self.latency_p50_ms is not None:
+            if self.latency_p50_ms >= 1000:
+                return f"{self.latency_p50_ms / 1000.0:.2f}s"
+            return f"{self.latency_p50_ms:.0f}ms"
+        return "--"
+
+    @property
+    def formatted_tps(self) -> str:
+        if self.throughput_p50_tps is not None:
+            return f"{self.throughput_p50_tps:.0f} tps"
+        return "--"
+
+    @property
+    def formatted_uptime(self) -> str:
+        if self.uptime_1d_pct is not None:
+            return f"{self.uptime_1d_pct:.1f}%"
+        return "--"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,6 +87,11 @@ class ProviderStats:
             "total_tokens": self.total_tokens,
             "token_share": round(self.token_share, 4),
             "token_share_pct": round(self.token_share * 100.0, 2),
+            "latency_p50_ms": self.latency_p50_ms,
+            "latency_p90_ms": self.latency_p90_ms,
+            "throughput_p50_tps": self.throughput_p50_tps,
+            "throughput_p90_tps": self.throughput_p90_tps,
+            "uptime_1d_pct": self.uptime_1d_pct,
         }
 
 
@@ -76,6 +108,11 @@ class ModelStats:
     input_chart_data: List[Dict[str, Any]]
     output_chart_data: List[Dict[str, Any]]
 
+    # Model-level aggregated latency/tps/uptime if available
+    avg_latency_p50_ms: Optional[float] = None
+    avg_throughput_p50_tps: Optional[float] = None
+    avg_uptime_1d_pct: Optional[float] = None
+
     @property
     def provider_count(self) -> int:
         return len(self.providers)
@@ -86,24 +123,42 @@ class ModelStats:
 
     @property
     def formatted_weighted_input_price(self) -> str:
-        return f"${self.weighted_input_price:.4f} /M"
+        return f"${self.weighted_input_price:.4f}"
 
     @property
     def formatted_weighted_output_price(self) -> str:
-        return f"${self.weighted_output_price:.4f} /M"
+        return f"${self.weighted_output_price:.4f}"
 
     @property
     def formatted_total_tokens(self) -> str:
         return format_tokens(self.total_tokens)
 
+    @property
+    def formatted_avg_latency(self) -> str:
+        if self.avg_latency_p50_ms is not None:
+            if self.avg_latency_p50_ms >= 1000:
+                return f"{self.avg_latency_p50_ms / 1000.0:.2f}s"
+            return f"{self.avg_latency_p50_ms:.0f}ms"
+        return "--"
+
+    @property
+    def formatted_avg_tps(self) -> str:
+        if self.avg_throughput_p50_tps is not None:
+            return f"{self.avg_throughput_p50_tps:.0f} tps"
+        return "--"
+
+    @property
+    def formatted_avg_uptime(self) -> str:
+        if self.avg_uptime_1d_pct is not None:
+            return f"{self.avg_uptime_1d_pct:.1f}%"
+        return "--"
+
     def get_provider(self, query: str) -> Optional[ProviderStats]:
         """Find a provider by name, slug, or substring match."""
         q = query.strip().lower()
-        # 1. Exact match on slug or name
         for p in self.providers:
             if p.slug.lower() == q or p.name.lower() == q:
                 return p
-        # 2. Substring match
         for p in self.providers:
             if q in p.slug.lower() or q in p.name.lower():
                 return p
@@ -113,6 +168,9 @@ class ModelStats:
         """
         Sort providers by:
         - 'cache' or 'hit_rate': cache hit rate
+        - 'latency': p50 latency (lower is better, so default asc if requested)
+        - 'tps' or 'throughput': p50 throughput (higher is better)
+        - 'uptime': 1d uptime %
         - 'input_price': effective input price
         - 'output_price': effective output price
         - 'tokens' or 'volume': total tokens served
@@ -122,6 +180,14 @@ class ModelStats:
         f = field.lower()
         if f in ("cache", "cache_hit_rate", "hit_rate"):
             key = lambda p: p.cache_hit_rate
+        elif f in ("latency", "lat"):
+            # Put None at the end
+            key = lambda p: (p.latency_p50_ms is None, p.latency_p50_ms or 999999)
+            return sorted(self.providers, key=key, reverse=not descending)
+        elif f in ("tps", "throughput"):
+            key = lambda p: p.throughput_p50_tps or 0.0
+        elif f in ("uptime", "up"):
+            key = lambda p: p.uptime_1d_pct or 0.0
         elif f in ("input_price", "input"):
             key = lambda p: p.effective_input_price
         elif f in ("output_price", "output"):
@@ -149,5 +215,8 @@ class ModelStats:
             "weighted_cache_hit_rate_pct": round(self.weighted_cache_hit_rate * 100.0, 2),
             "weighted_input_price_per_m": self.weighted_input_price,
             "weighted_output_price_per_m": self.weighted_output_price,
+            "avg_latency_p50_ms": self.avg_latency_p50_ms,
+            "avg_throughput_p50_tps": self.avg_throughput_p50_tps,
+            "avg_uptime_1d_pct": self.avg_uptime_1d_pct,
             "providers": [p.to_dict() for p in self.providers],
         }
