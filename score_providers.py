@@ -246,6 +246,7 @@ def main():
     parser.add_argument("--prior", type=float, default=0.5, help="Bayesian shrinkage prior (0.0 - 1.0)")
     parser.add_argument("--prior-weight", type=float, default=1e9, help="Bayesian prior weight tokens (W)")
     parser.add_argument("--no-discount", action="store_true", help="Use raw list pricing without endpoint discounts")
+    parser.add_argument("--all-quants", action="store_true", help="Include all quantizations (defaults to model's primary variant, e.g. fp8)")
     parser.add_argument("-n", "--top", type=int, default=10, help="Number of top providers to display")
     parser.add_argument("--json", action="store_true", help="Output raw JSON format")
 
@@ -264,6 +265,12 @@ def main():
         prior_weight_tokens=args.prior_weight,
         apply_discount=not args.no_discount,
     )
+
+    if not args.all_quants:
+        # Detect if model has a primary quantization (like fp8) and filter to it, matching OpenRouter web pricing page
+        quants = [getattr(r, "quantization", "unknown") for r in results]
+        if "fp8" in quants:
+            results = [r for r in results if getattr(r, "quantization", "unknown") == "fp8"]
 
     if args.json:
         print(json.dumps([r.to_dict() for r in results[:args.top]], indent=2))

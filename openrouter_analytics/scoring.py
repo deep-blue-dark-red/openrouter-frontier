@@ -106,6 +106,7 @@ class ScoreBreakdown:
     uptime_pct: Optional[float] = None
     ttft_seconds: Optional[float] = None
     throughput_tps: Optional[float] = None
+    quantization: str = "unknown"
     rank: int = 0
 
     @property
@@ -165,6 +166,7 @@ def evaluate_endpoint(
     provider_name: str = "Unknown",
     provider_slug: str = "unknown",
     endpoint_id: str = "",
+    quantization: str = "unknown",
 ) -> ScoreBreakdown:
     """
     Evaluate an endpoint using the ProviderUtility scoring model.
@@ -262,4 +264,5 @@ def evaluate_endpoint(
         uptime_pct=uptime_pct,
         ttft_seconds=ttft_seconds,
         throughput_tps=throughput_tps,
+        quantization=quantization,
     )

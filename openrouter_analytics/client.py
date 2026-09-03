@@ -146,18 +146,24 @@ class OpenRouterAnalytics:
                 pass
 
         pricing_map: Dict[str, EndpointPricing] = {}
+        quant_map: Dict[str, str] = {}
         for ep in raw_endpoints:
             raw_p = ep.get("pricing", {})
             parsed = EndpointPricing.from_api_dict(raw_p, apply_discount=apply_discount)
             tag = (ep.get("tag") or "").lower()
             p_name = (ep.get("provider_name") or "").lower()
+            q = ep.get("quantization") or "unknown"
             if tag:
                 pricing_map[tag] = parsed
+                quant_map[tag] = q
                 if "/" in tag:
                     pricing_map[tag.split("/")[0]] = parsed
+                    quant_map[tag.split("/")[0]] = q
             if p_name:
                 pricing_map[p_name] = parsed
+                quant_map[p_name] = q
 
+        self._last_quant_map = quant_map
         return pricing_map
 
     def get_model_stats(self, model: str, apply_discount: bool = True) -> ModelStats:
@@ -242,6 +248,7 @@ class OpenRouterAnalytics:
                     input_cache_write=None,
                 )
 
+            q_val = getattr(self, "_last_quant_map", {}).get(p_slug.lower()) or getattr(self, "_last_quant_map", {}).get(p_name.lower()) or "unknown"
             providers.append(
                 ProviderStats(
                     endpoint_id=ep_id,
@@ -258,6 +265,7 @@ class OpenRouterAnalytics:
                     throughput_p90_tps=tps_p90,
                     uptime_1d_pct=upt,
                     pricing=p_pricing,
+                    quantization=q_val,
                 )
             )
 

@@ -36,6 +36,7 @@ class ProviderStats:
 
     # Endpoint pricing breakdown (from endpoints API)
     pricing: Optional[Any] = None  # EndpointPricing
+    quantization: str = "unknown"
 
     @property
     def cache_hit_rate_pct(self) -> float:
@@ -98,6 +99,7 @@ class ProviderStats:
             provider_name=self.name,
             provider_slug=self.slug,
             endpoint_id=self.endpoint_id,
+            quantization=self.quantization,
         )
 
     def to_dict(self) -> Dict[str, Any]:
