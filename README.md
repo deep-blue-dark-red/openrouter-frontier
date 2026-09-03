@@ -31,7 +31,25 @@ uv pip install -e .
 
 ## Executable Scripts
 
-### 1. `score_providers.py` — Cost & Utility Scoring
+### 1. `openrouter-tui` — Interactive Terminal Explorer
+
+Interactive terminal UI (inspired by `makiss`) with:
+- **Model List View**: Models sorted by Pareto frontier ranking (top items on the frontier starting from lowest cost to highest, followed by distance to frontier).
+- **Live Fuzzy Search**: Punctuation-agnostic search (`zai` matches `z-ai` and `z.ai`, `claude37` matches `claude-3.7-sonnet`, `gemini25` matches `gemini-2.5-flash`).
+- **Provider View**: Press **Enter** on any model to view its serving endpoints sorted by ProviderUtility Scored Cost.
+- **Spec Card**: Press **Enter** on a provider to inspect detailed pricing, latency percentiles, and Bayesian shrinkage metrics.
+- **Controls**: Up/Down / Ctrl-P/N / Mouse scroll to navigate, PgUp/PgDn to jump 5, Tab/a to toggle quantization filters, Esc / Backspace to return or exit.
+
+```bash
+# Launch interactive TUI from any directory
+openrouter-tui
+
+# Or run locally from repo
+./openrouter-tui
+```
+
+---
+### 2. `score_providers.py` — Cost & Utility Scoring
 
 Evaluates providers and ranks them by expected cost per turn.
 
@@ -70,7 +88,7 @@ Lower Total Cost represents higher utility. Ranks include cache hit rates, shrin
 
 ---
 
-### 2. `provider_frontier.py` — Pareto Frontier Efficiency
+### 3. `provider_frontier.py` — Pareto Frontier Efficiency
 
 Instead of picking an arbitrary time-value dollar scalar, `provider_frontier.py` finds which providers form the non-dominated Pareto frontier across Cost, Latency, Throughput, Cache Hit Rate, and Uptime.
 
@@ -153,7 +171,7 @@ x-ai/grok-4.20                        $0.003750     $1.2500     $2.5000    $0.20
 
 ---
 
-### 4. `get_models.py` — Model Catalog Query & Inspector
+### 5. `get_models.py` — Model Catalog Query & Inspector
 
 Fast search and inspection for all 400+ models on OpenRouter with prompt caching, context length, and pricing breakdown.
 
