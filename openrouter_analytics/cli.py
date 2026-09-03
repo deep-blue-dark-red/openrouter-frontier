@@ -6,8 +6,9 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from .client import OpenRouterAnalytics, get_model_stats
+from .client import OpenRouterAnalytics, get_model_stats, score_model_providers
 from .resolver import search_models, resolve_model
+from .scoring import ScoringConfig, ScoreBreakdown
 
 console = Console()
 
@@ -66,7 +67,7 @@ def _color_uptime(upt_pct: Optional[float], text: str) -> Text:
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
-    """OpenRouter Analytics: Inspect 24h provider stats, cache hit rates, latency, TPS, and uptime."""
+    """OpenRouter Analytics: Inspect 24h provider stats, cache hit rates, pricing, and utility scores."""
     pass
 
 
@@ -77,7 +78,7 @@ def main():
     "--sort",
     "-s",
     default="cache",
-    type=click.Choice(["cache", "latency", "tps", "uptime", "input", "output", "tokens", "share", "name"]),
+    type=click.Choice(["cache", "score", "token_cost", "latency", "tps", "uptime", "input", "output", "tokens", "share", "name"]),
     help="Sort column (default: cache)."
 )
 @click.option("--top", "-n", default=None, type=int, help="Limit output to top N providers.")
@@ -168,17 +169,136 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
     console.print("[dim]Data represents observed effective usage today (UTC) and live endpoint metrics across OpenRouter.[/dim]\n")
 
 
+@main.command(name="score")
+@click.argument("model", required=True)
+@click.option("--prompt-tokens", "-c", default=2000, type=int, help="Prompt context tokens per turn (C). Default: 2000.")
+@click.option("--completion-tokens", "-o", default=500, type=int, help="Completion tokens per turn (O). Default: 500.")
+@click.option("--time-value", "-t", default=0.0, type=float, help="Economic time value in USD/hr. Default: 0.0 (pure token cost).")
+@click.option("--price-failures/--no-failures", default=True, help="Include failure risk cost based on endpoint uptime.")
+@click.option("--prior", default=0.5, type=float, help="Prior cache hit rate for shrinkage. Default: 0.5.")
+@click.option("--prior-weight", "-w", default=1e9, type=float, help="Prior weight tokens (W). Default: 1e9.")
+@click.option("--discount/--no-discount", default=True, help="Apply endpoint discounts if listed.")
+@click.option("--provider", "-p", default=None, help="Filter to a specific provider.")
+@click.option("--top", "-n", default=None, type=int, help="Limit to top N providers.")
+@click.option("--json-output", "--json", is_flag=True, help="Output raw JSON.")
+def score_command(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    time_value: float,
+    price_failures: bool,
+    prior: float,
+    prior_weight: float,
+    discount: bool,
+    provider: Optional[str],
+    top: Optional[int],
+    json_output: bool,
+):
+    """
+    Evaluate and rank providers using the ProviderUtility scoring model.
+    Calculates expected cost per turn (Token Cost + Time Cost + Failure Risk).
+    """
+    cfg = ScoringConfig(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        time_value_usd_per_hour=time_value,
+        price_failures=price_failures,
+        prior=prior,
+        prior_weight_tokens=prior_weight,
+        apply_discount=discount,
+    )
+
+    try:
+        scores = score_model_providers(model, config=cfg)
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+    if provider:
+        q = provider.lower()
+        scores = [s for s in scores if q in s.provider_name.lower() or q in s.provider_slug.lower()]
+        if not scores:
+            console.print(f"[bold red]Provider '{provider}' not found for model.[/bold red]")
+            raise click.Abort()
+    elif top:
+        scores = scores[:top]
+
+    if json_output:
+        click.echo(json.dumps([s.to_dict() for s in scores], indent=2))
+        return
+
+    # Header Panel
+    mode_desc = "Pure Token Cost" if time_value == 0 and not price_failures else "Full Utility Model"
+    console.print()
+    console.print(
+        Panel.fit(
+            f"Model: [bold cyan]{model}[/bold cyan] | Turn: [bold]{prompt_tokens}[/bold] prompt + [bold]{completion_tokens}[/bold] completion tokens\n"
+            f"Mode: [bold yellow]{mode_desc}[/bold yellow] | Time Value: [bold]${time_value:.2f}/hr[/bold] | Failure Risk: [bold]{'Yes' if price_failures else 'No'}[/bold]\n"
+            f"Shrinkage: prior=[bold]{prior * 100:.0f}%[/bold], weight=[bold]{prior_weight / 1e9:.1f}B[/bold] tokens | Discounts: [bold]{'Applied' if discount else 'List Price'}[/bold]",
+            title="ProviderUtility Evaluation & Cost per Turn",
+            border_style="magenta"
+        )
+    )
+
+    table = Table(show_header=True, header_style="bold magenta", border_style="dim")
+    table.add_column("Rank", style="dim", justify="right", width=4)
+    table.add_column("Provider", style="bold white", no_wrap=True)
+    table.add_column("Total Cost/Turn", justify="right", style="bold green")
+    table.add_column("Token Cost", justify="right")
+    if time_value > 0:
+        table.add_column("Time Cost", justify="right")
+    if price_failures:
+        table.add_column("Fail Risk", justify="right")
+    table.add_column("h (used)", justify="right")
+    table.add_column("h (pub)", justify="right", style="dim")
+    table.add_column("Hit $/M", justify="right")
+    table.add_column("Miss $/M", justify="right")
+    table.add_column("Latency", justify="right")
+    table.add_column("TPS", justify="right")
+    table.add_column("Uptime", justify="right")
+
+    for s in scores:
+        row = [
+            f"#{s.rank}",
+            s.provider_name,
+            f"${s.total_cost_usd:.6f}",
+            f"${s.token_cost_usd:.6f}",
+        ]
+        if time_value > 0:
+            row.append(f"${s.time_cost_usd:.6f}")
+        if price_failures:
+            row.append(f"${s.failure_cost_usd:.6f}")
+
+        row.extend([
+            _color_hit_rate(s.h_used * 100.0),
+            f"{s.h_raw * 100.0:.1f}%",
+            f"${s.hit_price:.4f}",
+            f"${s.miss_price:.4f}",
+            f"{s.ttft_seconds:.2f}s" if s.ttft_seconds else "--",
+            f"{s.throughput_tps:.0f} tps" if s.throughput_tps else "--",
+            f"{s.uptime_pct:.1f}%" if s.uptime_pct else "--",
+        ])
+        table.add_row(*row)
+
+    console.print(table)
+    console.print("[dim]Lower Total Cost represents higher utility. Includes shrinkage and cache hit pricing.[/dim]\n")
+
+
 @main.command(name="cache")
 @click.argument("model", required=True)
 @click.argument("provider", required=False)
+@click.option("--prompt-tokens", "-c", default=2000, type=int, help="Prompt tokens for score evaluation.")
+@click.option("--completion-tokens", "-o", default=500, type=int, help="Completion tokens for score evaluation.")
 @click.option("--json-output", "--json", is_flag=True, help="Output raw JSON.")
-def cache_command(model: str, provider: Optional[str], json_output: bool):
-    """Quick lookup of cache hit rate, latency, TPS, and uptime for a provider."""
+def cache_command(model: str, provider: Optional[str], prompt_tokens: int, completion_tokens: int, json_output: bool):
+    """Quick lookup of cache hit rate, latency, TPS, and utility score for a provider."""
     try:
         stats = get_model_stats(model)
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise click.Abort()
+
+    cfg = ScoringConfig(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
 
     if provider:
         p = stats.get_provider(provider)
@@ -186,20 +306,27 @@ def cache_command(model: str, provider: Optional[str], json_output: bool):
             console.print(f"[bold red]Provider '{provider}' not found for '{stats.model_id}'.[/bold red]")
             raise click.Abort()
 
+        score = p.evaluate_score(cfg)
+
         if json_output:
-            click.echo(json.dumps(p.to_dict(), indent=2))
+            out = p.to_dict()
+            if score:
+                out["score_evaluation"] = score.to_dict()
+            click.echo(json.dumps(out, indent=2))
             return
 
         console.print()
         console.print(f"[bold cyan]Model:[/bold cyan] {stats.model_name} ({stats.model_id})")
         console.print(f"[bold cyan]Provider:[/bold cyan] {p.name} ({p.slug})")
-        console.print(f"[bold cyan]24h Cache Hit Rate:[/bold cyan] {_color_hit_rate(p.cache_hit_rate_pct)}")
+        console.print(f"[bold cyan]24h Published Cache Hit:[/bold cyan] {_color_hit_rate(p.cache_hit_rate_pct)}")
+        if score:
+            console.print(f"[bold cyan]Shrunken Hit Rate (h_used):[/bold cyan] {_color_hit_rate(score.h_used * 100.0)}")
+            console.print(f"[bold cyan]Expected Token Cost / Turn:[/bold cyan] [bold green]{score.formatted_token_cost}[/bold green] ({prompt_tokens} prompt + {completion_tokens} completion)")
+            console.print(f"[bold cyan]Cache Hit Price:[/bold cyan] ${score.hit_price:.4f} /M | [bold cyan]Miss Price:[/bold cyan] ${score.miss_price:.4f} /M")
         console.print(f"[bold cyan]Latency (p50):[/bold cyan] {_color_latency(p.latency_p50_ms, p.formatted_latency)}")
         console.print(f"[bold cyan]Throughput (p50):[/bold cyan] {_color_tps(p.throughput_p50_tps, p.formatted_tps)}")
         console.print(f"[bold cyan]Uptime (24h):[/bold cyan] {_color_uptime(p.uptime_1d_pct, p.formatted_uptime)}")
-        console.print(f"[bold cyan]Effective Input Price:[/bold cyan] {p.formatted_input_price}")
-        console.print(f"[bold cyan]Effective Output Price:[/bold cyan] {p.formatted_output_price}")
-        console.print(f"[bold cyan]Tokens Served:[/bold cyan] {p.formatted_tokens} ({p.formatted_token_share} share)")
+        console.print(f"[bold cyan]Tokens Served (24h):[/bold cyan] {p.formatted_tokens} ({p.formatted_token_share} share)")
         console.print()
     else:
         providers = stats.sort_by("cache")
@@ -224,14 +351,17 @@ def cache_command(model: str, provider: Optional[str], json_output: bool):
 @main.command(name="compare")
 @click.argument("model", required=True)
 @click.argument("providers", nargs=-1, required=True)
-def compare_command(model: str, providers: List[str]):
-    """Compare multiple providers side by side (cache, latency, TPS, uptime, price)."""
+@click.option("--prompt-tokens", "-c", default=2000, type=int, help="Prompt tokens for turn evaluation.")
+@click.option("--completion-tokens", "-o", default=500, type=int, help="Completion tokens for turn evaluation.")
+def compare_command(model: str, providers: List[str], prompt_tokens: int, completion_tokens: int):
+    """Compare multiple providers side by side (cache, latency, TPS, uptime, cost score)."""
     try:
         stats = get_model_stats(model)
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise click.Abort()
 
+    cfg = ScoringConfig(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     selected = []
     for prov_name in providers:
         p = stats.get_provider(prov_name)
@@ -244,26 +374,29 @@ def compare_command(model: str, providers: List[str]):
         console.print("[red]No matching providers found to compare.[/red]")
         raise click.Abort()
 
-    table = Table(title=f"Provider Comparison for {stats.model_name}", header_style="bold magenta")
+    table = Table(title=f"Provider Comparison for {stats.model_name} ({prompt_tokens} in / {completion_tokens} out)", header_style="bold magenta")
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Cache", justify="right")
+    table.add_column("Total Cost/Turn", justify="right", style="bold green")
+    table.add_column("h (used)", justify="right")
+    table.add_column("Cache (pub)", justify="right")
     table.add_column("Latency", justify="right")
     table.add_column("TPS", justify="right")
     table.add_column("Uptime", justify="right")
-    table.add_column("Input", justify="right")
-    table.add_column("Output", justify="right")
     table.add_column("Tokens (24h)", justify="right")
     table.add_column("Share", justify="right")
 
     for p in selected:
+        sb = p.evaluate_score(cfg)
+        cost_str = f"${sb.total_cost_usd:.6f}" if sb else "--"
+        h_used_str = _color_hit_rate(sb.h_used * 100.0) if sb else Text("--")
         table.add_row(
             p.name,
+            cost_str,
+            h_used_str,
             _color_hit_rate(p.cache_hit_rate_pct),
             _color_latency(p.latency_p50_ms, p.formatted_latency),
             _color_tps(p.throughput_p50_tps, p.formatted_tps),
             _color_uptime(p.uptime_1d_pct, p.formatted_uptime),
-            p.formatted_input_price,
-            p.formatted_output_price,
             p.formatted_tokens,
             p.formatted_token_share,
         )

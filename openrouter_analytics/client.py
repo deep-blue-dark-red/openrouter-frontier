@@ -1,10 +1,18 @@
 import re
+import time
 import json
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+import concurrent.futures
 import requests
 
 from .models import ProviderStats, ModelStats
 from .resolver import resolve_model
+from .scoring import EndpointPricing, ScoringConfig, ScoreBreakdown, evaluate_endpoint
+
+CACHE_DIR = Path.home() / ".cache" / "openrouter_analytics"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_TTL = 300  # 5 minutes
 
 
 class OpenRouterAnalyticsError(Exception):
@@ -13,7 +21,7 @@ class OpenRouterAnalyticsError(Exception):
 
 
 class OpenRouterAnalytics:
-    """Client for querying OpenRouter stats, cache hit rates, latency, TPS, and uptime."""
+    """Client for querying OpenRouter stats, cache hit rates, latency, TPS, uptime, and scoring."""
 
     BASE_FRONTEND_URL = "https://openrouter.ai/api/frontend/v1"
     BASE_API_URL = "https://openrouter.ai/api/v1"
@@ -26,16 +34,29 @@ class OpenRouterAnalytics:
     def _fetch_endpoint_performance(self, model_id: str, canonical_slug: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
         """
         Extract latency, throughput (TPS), and uptime for endpoints.
-        Attempts to read from model page RSC flight data, falling back to public endpoints API.
+        Attempts to read from cache, then model page RSC flight data, falling back to public endpoints API.
         """
+        safe_slug = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", canonical_slug)
+        perf_cache_file = CACHE_DIR / f"perf_{safe_slug}.json"
+
+        if perf_cache_file.exists():
+            try:
+                mtime = perf_cache_file.stat().st_mtime
+                if time.time() - mtime < CACHE_TTL:
+                    with open(perf_cache_file, "r") as f:
+                        cached = json.load(f)
+                        return cached.get("stats", {}), cached.get("uptime", {})
+            except Exception:
+                pass
+
         stats_by_endpoint: Dict[str, Dict[str, Any]] = {}
         uptime_by_endpoint: Dict[str, float] = {}
 
-        # 1. Try fetching model page flight data (contains p50 latency, p50 throughput, uptime)
-        for slug_candidate in (model_id, canonical_slug):
+        candidates = [canonical_slug] if model_id == canonical_slug else [canonical_slug, model_id]
+        for slug_candidate in candidates:
             url = f"{self.BASE_SITE_URL}/models/{slug_candidate}"
             try:
-                resp = requests.get(url, headers=self.headers, timeout=10)
+                resp = requests.get(url, headers=self.headers, timeout=6)
                 if resp.status_code == 200:
                     html = resp.text
                     rsc_raw = ""
@@ -72,11 +93,10 @@ class OpenRouterAnalytics:
             except Exception:
                 pass
 
-        # 2. Fallback to public endpoints API if uptime or stats missing
         if not uptime_by_endpoint:
             ep_url = f"{self.BASE_API_URL}/models/{canonical_slug}/endpoints"
             try:
-                resp = requests.get(ep_url, headers=self.headers, timeout=10)
+                resp = requests.get(ep_url, headers=self.headers, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json().get("data", {})
                     for ep in data.get("endpoints", []):
@@ -87,34 +107,92 @@ class OpenRouterAnalytics:
             except Exception:
                 pass
 
+        # Save to disk cache
+        try:
+            with open(perf_cache_file, "w") as f:
+                json.dump({"stats": stats_by_endpoint, "uptime": uptime_by_endpoint}, f)
+        except Exception:
+            pass
+
         return stats_by_endpoint, uptime_by_endpoint
 
-    def get_model_stats(self, model: str) -> ModelStats:
+    def _fetch_endpoints_pricing(self, canonical_slug: str, apply_discount: bool = True) -> Dict[str, EndpointPricing]:
+        """Fetch list pricing per endpoint from the public API (with caching)."""
+        safe_slug = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", canonical_slug)
+        pricing_cache_file = CACHE_DIR / f"pricing_{safe_slug}.json"
+
+        raw_endpoints = []
+        if pricing_cache_file.exists():
+            try:
+                mtime = pricing_cache_file.stat().st_mtime
+                if time.time() - mtime < CACHE_TTL:
+                    with open(pricing_cache_file, "r") as f:
+                        raw_endpoints = json.load(f)
+            except Exception:
+                pass
+
+        if not raw_endpoints:
+            url = f"{self.BASE_API_URL}/models/{canonical_slug}/endpoints"
+            try:
+                resp = requests.get(url, headers=self.headers, timeout=6)
+                if resp.status_code == 200:
+                    raw_endpoints = resp.json().get("data", {}).get("endpoints", [])
+                    try:
+                        with open(pricing_cache_file, "w") as f:
+                            json.dump(raw_endpoints, f)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        pricing_map: Dict[str, EndpointPricing] = {}
+        for ep in raw_endpoints:
+            raw_p = ep.get("pricing", {})
+            parsed = EndpointPricing.from_api_dict(raw_p, apply_discount=apply_discount)
+            tag = (ep.get("tag") or "").lower()
+            p_name = (ep.get("provider_name") or "").lower()
+            if tag:
+                pricing_map[tag] = parsed
+                if "/" in tag:
+                    pricing_map[tag.split("/")[0]] = parsed
+            if p_name:
+                pricing_map[p_name] = parsed
+
+        return pricing_map
+
+    def get_model_stats(self, model: str, apply_discount: bool = True) -> ModelStats:
         """
-        Fetch full 24h stats (cache hit rates, effective pricing, latency, TPS, uptime, tokens)
+        Fetch full 24h stats (cache hit rates, effective pricing, endpoint pricing, latency, TPS, uptime, tokens)
         for all providers serving the requested model.
 
         :param model: Model name, ID, or slug (e.g. 'z-ai/glm-5.3-flash', 'glm-5.3-flash').
+        :param apply_discount: Whether to factor in endpoint discount rates into pricing.
         :return: ModelStats object containing list of ProviderStats.
         """
         model_id, canonical_slug, display_name = resolve_model(model)
 
-        # 1. Fetch effective pricing and cache hit rates
-        pricing_url = f"{self.BASE_FRONTEND_URL}/stats/effective-pricing"
-        params = {"permaslug": canonical_slug, "shape": "v7"}
-
-        try:
-            resp = requests.get(pricing_url, params=params, headers=self.headers, timeout=15)
+        def _get_pricing():
+            pricing_url = f"{self.BASE_FRONTEND_URL}/stats/effective-pricing"
+            params = {"permaslug": canonical_slug, "shape": "v7"}
+            resp = requests.get(pricing_url, params=params, headers=self.headers, timeout=10)
             resp.raise_for_status()
-            res_data = resp.json().get("data", {})
-        except Exception as e:
-            raise OpenRouterAnalyticsError(f"Failed to fetch stats for model '{model}' ({canonical_slug}): {e}")
+            return resp.json().get("data", {})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fut_pricing = executor.submit(_get_pricing)
+            fut_perf = executor.submit(self._fetch_endpoint_performance, model_id, canonical_slug)
+            fut_ep_pricing = executor.submit(self._fetch_endpoints_pricing, canonical_slug, apply_discount)
+
+            try:
+                res_data = fut_pricing.result()
+            except Exception as e:
+                raise OpenRouterAnalyticsError(f"Failed to fetch stats for model '{model}' ({canonical_slug}): {e}")
+
+            stats_map, uptime_map = fut_perf.result()
+            pricing_map = fut_ep_pricing.result()
 
         raw_summaries = res_data.get("providerSummaries", [])
         total_tokens_all = sum(s.get("totalTokens", 0) for s in raw_summaries)
-
-        # 2. Fetch endpoint performance (latency, throughput, uptime)
-        stats_map, uptime_map = self._fetch_endpoint_performance(model_id, canonical_slug)
 
         providers: List[ProviderStats] = []
         valid_latencies = []
@@ -123,6 +201,8 @@ class OpenRouterAnalytics:
 
         for s in raw_summaries:
             ep_id = s.get("endpointId", "")
+            p_name = s.get("providerName", "Unknown")
+            p_slug = s.get("providerSlug", "")
             p_tokens = s.get("totalTokens", 0)
             token_share = (p_tokens / total_tokens_all) if total_tokens_all > 0 else 0.0
 
@@ -133,10 +213,10 @@ class OpenRouterAnalytics:
             tps_p50 = perf.get("p50_throughput")
             tps_p90 = perf.get("p90_throughput")
 
-            # Merge uptime (check ep_id or providerSlug)
+            # Merge uptime
             upt = uptime_map.get(ep_id)
             if upt is None:
-                upt = uptime_map.get(s.get("providerSlug", ""))
+                upt = uptime_map.get(p_slug)
 
             if lat_p50 is not None:
                 valid_latencies.append(lat_p50)
@@ -145,11 +225,28 @@ class OpenRouterAnalytics:
             if upt is not None:
                 valid_uptimes.append(upt)
 
+            # Match EndpointPricing
+            p_pricing = pricing_map.get(p_slug.lower())
+            if not p_pricing:
+                p_pricing = pricing_map.get(p_name.lower())
+            if not p_pricing:
+                for k, v in pricing_map.items():
+                    if p_slug.lower() in k or k in p_slug.lower() or p_name.lower() in k or k in p_name.lower():
+                        p_pricing = v
+                        break
+            if not p_pricing:
+                p_pricing = EndpointPricing(
+                    prompt=s.get("effectiveInputPrice", 0.0),
+                    completion=s.get("effectiveOutputPrice", 0.0),
+                    input_cache_read=None,
+                    input_cache_write=None,
+                )
+
             providers.append(
                 ProviderStats(
                     endpoint_id=ep_id,
-                    name=s.get("providerName", "Unknown"),
-                    slug=s.get("providerSlug", ""),
+                    name=p_name,
+                    slug=p_slug,
                     effective_input_price=s.get("effectiveInputPrice", 0.0),
                     effective_output_price=s.get("effectiveOutputPrice", 0.0),
                     cache_hit_rate=s.get("cacheHitRate", 0.0),
@@ -160,6 +257,7 @@ class OpenRouterAnalytics:
                     throughput_p50_tps=tps_p50,
                     throughput_p90_tps=tps_p90,
                     uptime_1d_pct=upt,
+                    pricing=p_pricing,
                 )
             )
 
@@ -184,12 +282,15 @@ class OpenRouterAnalytics:
         )
 
     def get_provider_stats(self, model: str, provider: str) -> Optional[ProviderStats]:
-        """
-        Fetch stats for a single provider on a given model.
-        Returns None if provider is not found.
-        """
+        """Fetch stats for a single provider on a given model."""
         model_stats = self.get_model_stats(model)
         return model_stats.get_provider(provider)
+
+    def score_model_providers(self, model: str, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
+        """Evaluate and rank all providers serving a model using the utility scoring model."""
+        cfg = config or ScoringConfig()
+        model_stats = self.get_model_stats(model, apply_discount=cfg.apply_discount)
+        return model_stats.score_providers(cfg)
 
     def query_account_analytics(
         self,
@@ -234,16 +335,20 @@ class OpenRouterAnalytics:
         return resp.json()
 
 
-# Standalone shortcut functions
 _default_client = OpenRouterAnalytics()
 
 
-def get_model_stats(model: str) -> ModelStats:
+def get_model_stats(model: str, apply_discount: bool = True) -> ModelStats:
     """Get all provider stats, cache hit rates, latency, TPS, and uptime for a model."""
-    return _default_client.get_model_stats(model)
+    return _default_client.get_model_stats(model, apply_discount=apply_discount)
 
 
 def get_cache_hit_rate(model: str, provider: str) -> Optional[float]:
     """Get cache hit rate (0.0 to 1.0) for a model and provider."""
     p = _default_client.get_provider_stats(model, provider)
     return p.cache_hit_rate if p else None
+
+
+def score_model_providers(model: str, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
+    """Evaluate and rank all providers serving a model using the utility scoring model."""
+    return _default_client.score_model_providers(model, config=config)
