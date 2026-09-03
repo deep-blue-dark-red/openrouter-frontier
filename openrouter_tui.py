@@ -3,11 +3,13 @@
 openrouter-tui - Interactive Terminal UI for OpenRouter Analytics.
 
 Features:
-  - Catalog-wide model explorer sorted by Pareto efficiency frontier
-    (top models on the frontier starting from lowest cost, followed by dominated models
-    ordered by distance from the frontier).
+  - Model Explorer sorted by the Cost vs. Quality Pareto Frontier
+    (powered by live OpenRouter / Artificial Analysis benchmark scores).
+    Top models are on the frontier from lowest cost to highest, highlighting the KNEE point,
+    followed by dominated models ordered by distance from the frontier.
+  - Press 'm' to toggle benchmark metric: Intelligence Index vs. Coding Index.
   - Real-time delimiter-agnostic fuzzy searching ('zai' matches 'z-ai' and 'z.ai',
-    'glm53' matches 'glm-5.3-flash', 'claude37' matches 'claude-3.7-sonnet').
+    'glm53' matches 'glm-5.3-flash', 'claude' matches 'anthropic/claude-*').
   - Provider scoring view when a model is selected, showing all endpoints ranked by
     ProviderUtility scored cost per turn (cache hit rates, shrinkage, latency, TPS, uptime).
   - Keyboard & mouse navigation (Up/Down, PgUp/PgDn, Ctrl-P/N, Mouse wheel/clicks).
@@ -46,9 +48,10 @@ for p in possible_venvs:
         sys.path.insert(0, matches[0])
         break
 
-from openrouter_analytics.resolver import get_all_models, resolve_model
-from openrouter_analytics.client import score_model_providers, OpenRouterAnalytics
+from openrouter_analytics.resolver import resolve_model
+from openrouter_analytics.client import score_model_providers
 from openrouter_analytics.scoring import ScoringConfig, ScoreBreakdown
+from pareto_frontier import load_catalog_pricing, load_benchmarks, compute_pareto, strip_date_suffix
 
 
 # ==============================================================================
@@ -77,102 +80,65 @@ def matches_query(query: str, m: Dict[str, Any]) -> bool:
     return True
 
 
-def format_price(val: Any) -> str:
-    if val is None:
-        return "--"
-    try:
-        f = float(val)
-        if f <= 0:
-            return "Free"
-        p_m = f * 1_000_000.0 if f < 0.01 else f
-        return f"${p_m:.4f}"
-    except (ValueError, TypeError):
-        return "--"
+def build_pareto_model_catalog(metric: str = "intelligence") -> Tuple[List[Dict[str, Any]], int]:
+    """Loads catalog pricing and live benchmarks, then computes the Cost vs Quality Pareto frontier."""
+    catalog = load_catalog_pricing()
+    bench_items, weighted_prices = load_benchmarks(None, metric)
 
-
-def build_model_pareto_catalog(C: int = 2000, O: int = 500) -> List[Dict[str, Any]]:
-    """Loads all models, computes Pareto frontier and Euclidean distance to frontier in normalized space."""
-    raw_models = get_all_models()
+    score_key = f"{metric}_index"
     candidates = []
-    for m in raw_models:
-        p = m.get("pricing", {})
-        raw_prompt = float(p.get("prompt") or 0.0)
-        raw_compl = float(p.get("completion") or 0.0)
-        prompt_p = raw_prompt * 1e6 if raw_prompt < 0.01 else raw_prompt
-        compl_p = raw_compl * 1e6 if raw_compl < 0.01 else raw_compl
-        raw_read = float(p.get("input_cache_read") or 0.0) if p.get("input_cache_read") else None
-        read_p = (raw_read * 1e6 if raw_read < 0.01 else raw_read) if raw_read is not None else None
-        ctx = int(m.get("context_length") or 0)
+    seen_slugs = set()
 
-        if prompt_p <= 0 or compl_p <= 0 or ctx <= 0:
+    for item in bench_items:
+        score = item.get(score_key)
+        if score is None or score <= 0:
             continue
 
-        turn_cost = (C * prompt_p + O * compl_p) / 1e6
+        permaslug = item.get("model_permaslug") or item.get("uid") or ""
+        base_id = strip_date_suffix(permaslug)
+
+        if base_id in seen_slugs:
+            continue
+
+        cat_entry = catalog.get(base_id) or catalog.get(permaslug)
+        if not cat_entry or cat_entry["prompt_per_m"] <= 0:
+            continue
+
         candidates.append({
-            "id": m["id"],
-            "name": m.get("name") or m["id"],
-            "canonical_slug": m.get("canonical_slug") or m["id"],
-            "prompt_p": prompt_p,
-            "compl_p": compl_p,
-            "read_p": read_p,
-            "ctx": ctx,
-            "turn_cost": turn_cost,
-            "modality": m.get("architecture", {}).get("modality") or "text",
+            "id": base_id,
+            "permaslug": permaslug,
+            "name": item.get("display_name") or cat_entry["name"],
+            "score": float(score),
+            "cost": cat_entry["prompt_per_m"],
+            "prompt_p": cat_entry["prompt_per_m"],
+            "compl_p": cat_entry["completion_per_m"],
+            "metric": metric,
         })
+        seen_slugs.add(base_id)
 
-    # Compute Pareto frontier
-    for a in candidates:
-        is_dominated = False
-        read_a = a["read_p"] if a["read_p"] is not None else a["prompt_p"]
-        for b in candidates:
-            if a is b:
-                continue
-            read_b = b["read_p"] if b["read_p"] is not None else b["prompt_p"]
-            if (b["turn_cost"] <= a["turn_cost"] and b["ctx"] >= a["ctx"] and read_b <= read_a and b["compl_p"] <= a["compl_p"]) and (
-                b["turn_cost"] < a["turn_cost"] or b["ctx"] > a["ctx"] or read_b < read_a or b["compl_p"] < a["compl_p"]
-            ):
-                is_dominated = True
-                break
-        a["is_pareto"] = not is_dominated
+    frontier, knee_idx = compute_pareto(candidates)
+    frontier_ids = {m["id"] for m in frontier}
 
-    frontier = [c for c in candidates if c["is_pareto"]]
+    # Mark frontier status and knee
+    for item in candidates:
+        item["on_frontier"] = item["id"] in frontier_ids
+        item["is_knee"] = knee_idx is not None and item["id"] == frontier[knee_idx]["id"]
 
-    # Normalized distance to frontier in log(cost) x log(ctx)
-    log_costs = [math.log10(c["turn_cost"]) for c in candidates]
-    log_ctxs = [math.log10(c["ctx"]) for c in candidates]
-    min_lc, max_lc = min(log_costs), max(log_costs)
-    min_lx, max_lx = min(log_ctxs), max(log_ctxs)
+    # Calculate distance to frontier for dominated models
+    if frontier:
+        for item in candidates:
+            if item["on_frontier"]:
+                item["dist"] = 0.0
+            else:
+                better_scores = [f["score"] for f in frontier if f["cost"] <= item["cost"]]
+                if better_scores:
+                    item["dist"] = max(better_scores) - item["score"]
+                else:
+                    item["dist"] = 1.0
 
-    def norm_pt(c):
-        nc = (math.log10(c["turn_cost"]) - min_lc) / (max_lc - min_lc) if max_lc > min_lc else 0.0
-        nx = 1.0 - ((math.log10(c["ctx"]) - min_lx) / (max_lx - min_lx) if max_lx > min_lx else 0.0)
-        return nc, nx
-
-    frontier_pts = [norm_pt(f) for f in frontier]
-    min_cost = min(c["turn_cost"] for c in frontier) if frontier else 0.0
-    max_ctx = max(c["ctx"] for c in frontier) if frontier else 0
-
-    for c in candidates:
-        if c["is_pareto"]:
-            c["dist"] = 0.0
-            traits = []
-            if abs(c["turn_cost"] - min_cost) < 1e-6:
-                traits.append("Cheapest Model")
-            if c["ctx"] == max_ctx:
-                traits.append(f"Max Context ({max_ctx // 1000}k)")
-            elif c["ctx"] >= 1_000_000:
-                traits.append("1M Context")
-            if c["read_p"] and c["read_p"] <= 0.005:
-                traits.append("Ultra-Low Cache Read")
-            c["niche"] = " • ".join(traits) if traits else "Cost/Context Trade-off"
-        else:
-            pc, px = norm_pt(c)
-            c["dist"] = min(math.sqrt((pc - fc) ** 2 + (px - fx) ** 2) for fc, fx in frontier_pts)
-            c["niche"] = f"dist: {c['dist']:.3f}"
-
-    # Sort: frontier first by turn_cost ascending, then dominated by distance to frontier ascending
-    candidates.sort(key=lambda c: (0 if c["is_pareto"] else 1, c["turn_cost"] if c["is_pareto"] else c["dist"]))
-    return candidates
+    # Sort: frontier first by cost ascending, then dominated by distance to frontier ascending
+    candidates.sort(key=lambda x: (not x["on_frontier"], x["cost"] if x["on_frontier"] else x["dist"]))
+    return candidates, len(frontier)
 
 
 # ==============================================================================
@@ -190,7 +156,7 @@ def get_key() -> str:
         if ch == "\x1b":
             seq = ch
             while True:
-                r, _, _ = select.select([fd], [], [], 0.01)
+                r, _, _ = select.select([fd], [], [], 0.02)
                 if r:
                     more = os.read(fd, 64).decode("utf-8", errors="ignore")
                     if not more:
@@ -209,8 +175,8 @@ def get_key() -> str:
 # ==============================================================================
 
 def run_tui():
-    models = build_model_pareto_catalog()
-    pareto_count = sum(1 for m in models if m["is_pareto"])
+    current_metric = "intelligence"  # "intelligence" or "coding"
+    models, frontier_count = build_pareto_model_catalog(current_metric)
 
     current_view = "MODELS"  # "MODELS" or "PROVIDERS" or "DETAIL"
     query = ""
@@ -241,7 +207,6 @@ def run_tui():
                 filtered_models = [m for m in models if matches_query(query, m)] if query else models
                 selected_idx = max(0, min(selected_idx, len(filtered_models) - 1)) if filtered_models else 0
 
-                # Reserve rows: search(1), header(1), separator(1), footer spacer(1), footer help(2)
                 num_visible = min(len(filtered_models), max(2, term_height - 7))
 
                 if selected_idx < scroll_offset:
@@ -261,21 +226,20 @@ def run_tui():
 
                 # 1. Search Bar
                 search_prompt = f"Search Models: {query}█"
-                count_str = f"[{len(filtered_models)}/{len(models)} models | {pareto_count} Pareto-Optimal]"
+                count_str = f"[{len(filtered_models)}/{len(models)} models | {frontier_count} on Frontier | Metric: {current_metric.upper()}]"
                 space = max(2, term_width - len(search_prompt) - len(count_str) - 2)
                 top_bar = f"\x1b[1;36m{search_prompt}\x1b[0m{' ' * space}\x1b[2m{count_str}\x1b[0m"
                 sys.stdout.write(top_bar[:term_width + 15] + "\n")
 
                 # 2. Table Header
+                metric_label = "Intel Score" if current_metric == "intelligence" else "Coding Score"
                 cols = [
-                    ("Frontier", 12, "<"),
-                    ("Model ID", 34, "<"),
-                    ("Turn Cost", 11, ">"),
-                    ("Prompt $/M", 10, ">"),
-                    ("Compl $/M", 10, ">"),
-                    ("Read $/M", 9, ">"),
-                    ("Context", 9, ">"),
-                    ("Niche / Traits", 24, "<"),
+                    ("Status", 14, "<"),
+                    ("Model Name", 32, "<"),
+                    ("Model ID", 30, "<"),
+                    (metric_label, 12, ">"),
+                    ("Cost ($/1M)", 12, ">"),
+                    ("Output $/M", 11, ">"),
                 ]
                 header_parts = [f"{name:>{w}}" if a == ">" else f"{name:<{w}}" for name, w, a in cols]
                 header_str = "  ".join(header_parts)
@@ -286,59 +250,67 @@ def run_tui():
                 end_idx = min(len(filtered_models), scroll_offset + num_visible)
                 for i in range(scroll_offset, end_idx):
                     m = filtered_models[i]
-                    is_p = m["is_pareto"]
-                    status_str = "★ OPTIMAL" if is_p else f"dist:{m['dist']:.3f}"
-                    ctx_str = f"{m['ctx'] // 1000}k" if m["ctx"] >= 1000 else str(m["ctx"])
-                    read_str = f"${m['read_p']:.4f}" if m["read_p"] is not None else "--"
+                    on_f = m["on_frontier"]
+                    is_k = m.get("is_knee", False)
+
+                    if is_k:
+                        status_str = "★ KNEE"
+                    elif on_f:
+                        status_str = "★ OPTIMAL"
+                    else:
+                        status_str = f"-{m['dist']:.1f} pts"
+
+                    cost_str = f"${m['cost']:.4f}" if m['cost'] < 0.1 else f"${m['cost']:.2f}"
+                    compl_str = f"${m['compl_p']:.4f}" if m['compl_p'] < 0.1 else f"${m['compl_p']:.2f}"
 
                     row_vals = [
                         status_str,
-                        m["id"][:34],
-                        f"${m['turn_cost']:.6f}",
-                        f"${m['prompt_p']:.4f}",
-                        f"${m['compl_p']:.4f}",
-                        read_str,
-                        ctx_str,
-                        m["niche"][:24],
+                        m["name"][:32],
+                        m["id"][:30],
+                        f"{m['score']:.1f}",
+                        cost_str,
+                        compl_str,
                     ]
 
                     line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
                     line_clipped = line_str[:term_width - 1]
 
                     if i == selected_idx:
-                        # Highlight active row
-                        if is_p:
+                        if is_k:
+                            sys.stdout.write(f"\x1b[48;5;237;1;33m{line_clipped}\x1b[0m\n")
+                        elif on_f:
                             sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
                         else:
                             sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
                     else:
-                        if is_p:
-                            sys.stdout.write(f"\x1b[32m★ OPTIMAL\x1b[0m  {line_clipped[14:]}\n")
+                        if is_k:
+                            sys.stdout.write(f"\x1b[1;33m★ KNEE\x1b[0m         {line_clipped[15:]}\n")
+                        elif on_f:
+                            sys.stdout.write(f"\x1b[32m★ OPTIMAL\x1b[0m      {line_clipped[15:]}\n")
                         else:
                             sys.stdout.write(f"\x1b[2m{line_clipped}\x1b[0m\n")
 
-                # Fill any remaining height lines if fewer models than num_visible
                 rendered_rows = end_idx - scroll_offset
                 if rendered_rows < num_visible:
                     for _ in range(num_visible - rendered_rows):
                         sys.stdout.write("\n")
 
                 # 4. Footer Help
-                footer1 = "Enter/Click: View Provider Scores  •  Up/Down/Scroll: Navigate  •  PgUp/PgDn: Jump 5  •  Esc: Exit"
-                footer2 = "Models sorted by Pareto efficiency: Top items on frontier (lowest cost), followed by distance to frontier."
+                footer1 = "Enter: Inspect Providers  •  [m]: Toggle Metric (Intel/Coding)  •  Up/Down: Move  •  Esc: Exit"
+                footer2 = "Cost vs. Quality Pareto Frontier: Top models are non-dominated. ★ KNEE = highest quality gain per $."
                 sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
                 sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m")
                 sys.stdout.flush()
 
                 # Input event
                 key = get_key()
-                if key in ("\x1b[A", "\x10"):  # Up / Ctrl-P
+                if key in ("\x1b[A", "\x10"):  # Up
                     selected_idx = max(0, selected_idx - 1)
-                elif key in ("\x1b[B", "\x0e"):  # Down / Ctrl-N
+                elif key in ("\x1b[B", "\x0e"):  # Down
                     selected_idx = min(len(filtered_models) - 1, selected_idx + 1)
-                elif key in ("\x1b[5~", "\x1b[1;5A"):  # PgUp / Ctrl-Up
+                elif key in ("\x1b[5~", "\x1b[1;5A"):  # PgUp
                     selected_idx = max(0, selected_idx - 5)
-                elif key in ("\x1b[6~", "\x1b[1;5B"):  # PgDn / Ctrl-Down
+                elif key in ("\x1b[6~", "\x1b[1;5B"):  # PgDn
                     selected_idx = min(len(filtered_models) - 1, selected_idx + 5)
                 elif key.startswith("\x1b[<"):  # Mouse event
                     try:
@@ -347,16 +319,15 @@ def run_tui():
                         parts = body.split(";")
                         if len(parts) >= 3:
                             cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
-                            if cb in (64, 68):  # Wheel up
+                            if cb in (64, 68):
                                 selected_idx = max(0, selected_idx - 5)
-                            elif cb in (65, 69):  # Wheel down
+                            elif cb in (65, 69):
                                 selected_idx = min(len(filtered_models) - 1, selected_idx + 5)
-                            elif cb == 0 and not is_release:  # Left click
+                            elif cb == 0 and not is_release:
                                 if 4 <= cy < 4 + num_visible:
                                     clicked_idx = scroll_offset + (cy - 4)
                                     if 0 <= clicked_idx < len(filtered_models):
                                         if clicked_idx == selected_idx:
-                                            # Transition to providers view
                                             selected_model_dict = filtered_models[selected_idx]
                                             current_view = "PROVIDERS"
                                             first_draw = True
@@ -364,6 +335,11 @@ def run_tui():
                                             selected_idx = clicked_idx
                     except Exception:
                         pass
+                elif key in ("m", "M") and len(query) == 0:  # Toggle metric when search empty
+                    current_metric = "coding" if current_metric == "intelligence" else "intelligence"
+                    models, frontier_count = build_pareto_model_catalog(current_metric)
+                    selected_idx = 0
+                    scroll_offset = 0
                 elif key in ("\r", "\n"):  # Enter
                     if filtered_models:
                         selected_model_dict = filtered_models[selected_idx]
@@ -385,13 +361,12 @@ def run_tui():
             # VIEW 2: PROVIDER SCORING VIEW
             # ==================================================================
             elif current_view == "PROVIDERS":
-                # Fetch provider scores if not yet loaded for this model
                 if selected_model_dict and not provider_scores:
                     sys.stdout.write(f"\x1b[{last_total_lines}A\r\x1b[J")
                     sys.stdout.write(f"Fetching provider analytics for {selected_model_dict['id']}...\n")
                     sys.stdout.flush()
                     cfg = ScoringConfig(prompt_tokens=2000, completion_tokens=500, time_value_usd_per_hour=0.0, price_failures=True)
-                    provider_scores = score_model_providers(selected_model_dict["canonical_slug"], config=cfg)
+                    provider_scores = score_model_providers(selected_model_dict["permaslug"], config=cfg)
                     last_total_lines = 1
 
                 # Apply quantization filter (default: auto primary fp8 matching website)
@@ -421,13 +396,13 @@ def run_tui():
                 last_total_lines = total_lines
                 sys.stdout.write("\x1b[J")
 
-                # 1. Model Header Banner
+                # Header Banner
                 m_title = selected_model_dict.get("name", selected_model_dict["id"])
                 quant_tag = "[Filter: ALL QUANTS]" if filter_all_quants else (f"[Filter: {primary_quant.upper()}]" if primary_quant else "[Filter: ALL]")
                 banner = f"Providers for: \x1b[1;36m{m_title}\x1b[0m ({selected_model_dict['id']})  •  {quant_tag}"
                 sys.stdout.write(f"{banner[:term_width + 15]}\n")
 
-                # 2. Table Header
+                # Table Header
                 cols = [
                     ("Provider", 16, "<"),
                     ("Scored Cost", 12, ">"),
@@ -445,7 +420,7 @@ def run_tui():
                 sys.stdout.write(f"\x1b[1m{header_str[:term_width - 1]}\x1b[0m\n")
                 sys.stdout.write("─" * min(term_width - 1, len(header_str)) + "\n")
 
-                # 3. Provider Rows
+                # Provider Rows
                 end_idx = min(len(active_scores), provider_scroll_offset + num_visible)
                 for i in range(provider_scroll_offset, end_idx):
                     s = active_scores[i]
@@ -470,7 +445,6 @@ def run_tui():
                     line_clipped = line_str[:term_width - 1]
 
                     if i == provider_selected_idx:
-                        # Top provider highlight
                         if i == 0:
                             sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
                         else:
@@ -486,7 +460,7 @@ def run_tui():
                     for _ in range(num_visible - rendered_rows):
                         sys.stdout.write("\n")
 
-                # 4. Footer Help
+                # Footer Help
                 footer1 = "Esc / Backspace / q: Back to Models  •  Tab / a: Toggle Quants  •  Enter: Provider Spec Card"
                 footer2 = "Providers ranked by ProviderUtility Scored Cost. #1 provides optimal economic turn utility."
                 sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
@@ -495,24 +469,24 @@ def run_tui():
 
                 # Input event
                 key = get_key()
-                if key in ("\x1b[A", "\x10"):  # Up
+                if key in ("\x1b[A", "\x10"):
                     provider_selected_idx = max(0, provider_selected_idx - 1)
-                elif key in ("\x1b[B", "\x0e"):  # Down
+                elif key in ("\x1b[B", "\x0e"):
                     provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 1)
-                elif key in ("\x1b[5~", "\x1b[1;5A"):  # PgUp
+                elif key in ("\x1b[5~", "\x1b[1;5A"):
                     provider_selected_idx = max(0, provider_selected_idx - 5)
-                elif key in ("\x1b[6~", "\x1b[1;5B"):  # PgDn
+                elif key in ("\x1b[6~", "\x1b[1;5B"):
                     provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 5)
-                elif key.startswith("\x1b[<"):  # Mouse event
+                elif key.startswith("\x1b[<"):
                     try:
                         is_release = key.endswith("m")
                         body = key[3:-1]
                         parts = body.split(";")
                         if len(parts) >= 3:
                             cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
-                            if cb in (64, 68):  # Wheel up
+                            if cb in (64, 68):
                                 provider_selected_idx = max(0, provider_selected_idx - 5)
-                            elif cb in (65, 69):  # Wheel down
+                            elif cb in (65, 69):
                                 provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 5)
                             elif cb == 0 and not is_release:
                                 if 4 <= cy < 4 + num_visible:
@@ -521,20 +495,19 @@ def run_tui():
                                         provider_selected_idx = clicked_idx
                     except Exception:
                         pass
-                elif key in ("\t", "a", "A"):  # Toggle quants
+                elif key in ("\t", "a", "A"):
                     filter_all_quants = not filter_all_quants
                     provider_selected_idx = 0
                     provider_scroll_offset = 0
-                elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D"):  # Esc / Backspace / q / Left
-                    # Return to model list view
+                elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D"):
                     current_view = "MODELS"
                     provider_scores = []
                     first_draw = True
-                elif key in ("\r", "\n"):  # Enter -> Show detail popup
+                elif key in ("\r", "\n"):
                     if active_scores:
                         current_view = "DETAIL"
                         first_draw = True
-                elif key == "\x03":  # Ctrl-C
+                elif key == "\x03":
                     break
 
             # ==================================================================
@@ -580,7 +553,6 @@ def run_tui():
                 first_draw = True
 
     finally:
-        # Clean terminal restoration
         sys.stdout.write(f"\x1b[{last_total_lines}A\r\x1b[J\x1b[?1000l\x1b[?1006l\x1b[?25h")
         sys.stdout.flush()
 
