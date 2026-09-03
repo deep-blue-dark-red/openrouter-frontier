@@ -30,6 +30,8 @@ class OpenRouterAnalytics:
     def __init__(self, management_key: Optional[str] = None, user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"):
         self.management_key = management_key
         self.headers = {"User-Agent": user_agent}
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
 
     def _fetch_endpoint_performance(self, model_id: str, canonical_slug: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
         """
@@ -56,7 +58,7 @@ class OpenRouterAnalytics:
         for slug_candidate in candidates:
             url = f"{self.BASE_SITE_URL}/models/{slug_candidate}"
             try:
-                resp = requests.get(url, headers=self.headers, timeout=6)
+                resp = self.session.get(url, headers=self.headers, timeout=6)
                 if resp.status_code == 200:
                     html = resp.text
                     rsc_raw = ""
@@ -96,7 +98,7 @@ class OpenRouterAnalytics:
         if not uptime_by_endpoint:
             ep_url = f"{self.BASE_API_URL}/models/{canonical_slug}/endpoints"
             try:
-                resp = requests.get(ep_url, headers=self.headers, timeout=5)
+                resp = self.session.get(ep_url, headers=self.headers, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json().get("data", {})
                     for ep in data.get("endpoints", []):
@@ -134,7 +136,7 @@ class OpenRouterAnalytics:
         if not raw_endpoints:
             url = f"{self.BASE_API_URL}/models/{canonical_slug}/endpoints"
             try:
-                resp = requests.get(url, headers=self.headers, timeout=6)
+                resp = self.session.get(url, headers=self.headers, timeout=6)
                 if resp.status_code == 200:
                     raw_endpoints = resp.json().get("data", {}).get("endpoints", [])
                     try:
@@ -176,13 +178,33 @@ class OpenRouterAnalytics:
         :return: ModelStats object containing list of ProviderStats.
         """
         model_id, canonical_slug, display_name = resolve_model(model)
+        safe_slug = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", canonical_slug)
+
+        eff_cache_file = CACHE_DIR / f"eff_{safe_slug}.json"
+        cached_eff = None
+        if eff_cache_file.exists():
+            try:
+                mtime = eff_cache_file.stat().st_mtime
+                if time.time() - mtime < CACHE_TTL:
+                    with open(eff_cache_file, "r") as f:
+                        cached_eff = json.load(f)
+            except Exception:
+                pass
 
         def _get_pricing():
+            if cached_eff is not None:
+                return cached_eff
             pricing_url = f"{self.BASE_FRONTEND_URL}/stats/effective-pricing"
             params = {"permaslug": canonical_slug, "shape": "v7"}
-            resp = requests.get(pricing_url, params=params, headers=self.headers, timeout=10)
+            resp = self.session.get(pricing_url, params=params, headers=self.headers, timeout=10)
             resp.raise_for_status()
-            return resp.json().get("data", {})
+            data = resp.json().get("data", {})
+            try:
+                with open(eff_cache_file, "w") as f:
+                    json.dump(data, f)
+            except Exception:
+                pass
+            return data
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             fut_pricing = executor.submit(_get_pricing)

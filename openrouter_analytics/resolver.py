@@ -1,10 +1,18 @@
 import os
 import json
 import time
+import socket
 import difflib
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 import requests
+
+try:
+    import urllib3.util.connection
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
 
 CACHE_DIR = Path.home() / ".cache" / "openrouter_analytics"
 CACHE_FILE = CACHE_DIR / "models.json"
