@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-frontier.py - Pareto Frontier Analysis for OpenRouter Models & Providers.
+provider_frontier.py - Pareto Frontier Analysis for OpenRouter Models & Providers.
 
 Supports dual modes:
   1. Model Frontier: Multi-objective Pareto analysis across all 400+ models in OpenRouter
@@ -9,9 +9,9 @@ Supports dual modes:
      (Cost vs. Latency vs. TPS Throughput vs. Cache Hit Rate vs. Uptime).
 
 Usage:
-  ./frontier.py [MODEL]                 # Provider Pareto frontier for a specific model
-  ./frontier.py --models                # Model Pareto frontier across all OpenRouter models
-  ./frontier.py --optimal-only          # Show only Pareto-optimal candidates
+  ./provider_frontier.py [MODEL]                 # Provider Pareto frontier for a specific model
+  ./provider_frontier.py --models                # Model Pareto frontier across all OpenRouter models
+  ./provider_frontier.py --optimal-only          # Show only Pareto-optimal candidates
 """
 
 import sys

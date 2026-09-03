@@ -7,8 +7,8 @@ A high-performance Python tool suite and CLI for inspecting OpenRouter's 24-hour
 ## Key Capabilities
 
 - **ProviderUtility Scoring Model**: Calculates expected cost per turn factoring in prompt cache hit rates ($h$), Bayesian shrinkage ($h_{used}$), miss/write penalties, time value ($/hr), and uptime failure risk.
-- **Pareto Frontier Analysis (`frontier.py`)**: Multi-objective trade-off analysis balancing Cost vs. Latency vs. Throughput vs. Cache Hit Rate vs. Uptime. Identifies non-dominated Pareto-optimal providers.
-- **Standalone Fast Scripts**: Dedicated executable scripts (`./score_providers.py` and `./frontier.py`) with zero boilerplate.
+- **Pareto Frontier Analysis (`provider_frontier.py`)**: Multi-objective trade-off analysis balancing Cost vs. Latency vs. Throughput vs. Cache Hit Rate vs. Uptime. Identifies non-dominated Pareto-optimal providers.
+- **Standalone Fast Scripts**: Dedicated executable scripts (`./score_providers.py` and `./provider_frontier.py`) with zero boilerplate.
 - **Primary Quantization Matching**: Automatically filters to the official primary variant (e.g. `FP8`), matching the OpenRouter web pricing page by default.
 - **Sub-Second Performance**: Optimized with forced IPv4 resolution (eliminating the 10-second macOS IPv6 connection stall), HTTP Keep-Alive session pooling, and multi-tier 5-minute disk caching.
   - **Warm execution**: `~0.11s` (110ms)
@@ -70,16 +70,16 @@ Lower Total Cost represents higher utility. Ranks include cache hit rates, shrin
 
 ---
 
-### 2. `frontier.py` — Pareto Frontier Efficiency
+### 2. `provider_frontier.py` — Pareto Frontier Efficiency
 
-Instead of picking an arbitrary time-value dollar scalar, `frontier.py` finds which providers form the non-dominated Pareto frontier across Cost, Latency, Throughput, Cache Hit Rate, and Uptime.
+Instead of picking an arbitrary time-value dollar scalar, `provider_frontier.py` finds which providers form the non-dominated Pareto frontier across Cost, Latency, Throughput, Cache Hit Rate, and Uptime.
 
 ```bash
 # View all candidates and frontier classification
-./frontier.py z.ai/glm-5.3-flash
+./provider_frontier.py z.ai/glm-5.3-flash
 
 # View ONLY Pareto-optimal providers
-./frontier.py z.ai/glm-5.3-flash --optimal-only
+./provider_frontier.py z.ai/glm-5.3-flash --optimal-only
 ```
 
 #### Example Output:
@@ -112,19 +112,19 @@ io.net               $0.000459    $0.000445     1.76s     11     43.8%    86.8% 
 
 ---
 
-### 3. `model_frontier.py` — Catalog-Wide Model Pareto Frontier
+### 3. `model_provider_frontier.py` — Catalog-Wide Model Pareto Frontier
 
 Computes the multi-objective Pareto efficiency frontier across all **400+ models** in OpenRouter's catalog, finding optimal trade-offs between **Turn Cost**, **Context Window Size**, and **Cache Read Pricing**.
 
 ```bash
 # View Pareto-optimal models across the entire catalog
-./model_frontier.py --optimal-only
+./model_provider_frontier.py --optimal-only
 
 # Filter to a specific model family (e.g. Flash, Claude, Qwen)
-./model_frontier.py -q flash --optimal-only
+./model_provider_frontier.py -q flash --optimal-only
 
 # Output raw JSON
-./model_frontier.py --json
+./model_provider_frontier.py --json
 ```
 
 #### Example Output:
