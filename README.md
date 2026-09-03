@@ -112,6 +112,47 @@ io.net               $0.000459    $0.000445     1.76s     11     43.8%    86.8% 
 
 ---
 
+### 3. `model_frontier.py` — Catalog-Wide Model Pareto Frontier
+
+Computes the multi-objective Pareto efficiency frontier across all **400+ models** in OpenRouter's catalog, finding optimal trade-offs between **Turn Cost**, **Context Window Size**, and **Cache Read Pricing**.
+
+```bash
+# View Pareto-optimal models across the entire catalog
+./model_frontier.py --optimal-only
+
+# Filter to a specific model family (e.g. Flash, Claude, Qwen)
+./model_frontier.py -q flash --optimal-only
+
+# Output raw JSON
+./model_frontier.py --json
+```
+
+#### Example Output:
+
+```text
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+OpenRouter Catalog-Wide Model Pareto Frontier
+Multi-Objective Pareto Analysis  •  Turn: 2000 prompt + 500 completion tokens
+Evaluation: Turn Cost vs Context Length vs Cache Read Pricing  •  14 Pareto-Optimal Models
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Model ID                              Turn Cost  Prompt $/M   Compl $/M   Read $/M     Context  Frontier      Niche / Advantage           
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+mistralai/mistral-nemo                $0.000053     $0.0190     $0.0300         --        131k  ★ OPTIMAL     Cheapest Model              
+inclusionai/ling-3.0-flash            $0.000073     $0.0210     $0.0630    $0.0042        262k  ★ OPTIMAL     Cost/Context Trade-off      
+nex-agi/nex-n2-mini                   $0.000100     $0.0250     $0.1000    $0.0025        262k  ★ OPTIMAL     Cost/Context Trade-off      
+upstage/solar-pro4                    $0.000120     $0.0300     $0.1200    $0.0060        524k  ★ OPTIMAL     Cost/Context Trade-off      
+qwen/qwen3.7-flash                    $0.000125     $0.0300     $0.1300    $0.0060       1000k  ★ OPTIMAL     1M Context                  
+openai/gpt-5-nano:batch               $0.000150     $0.0250     $0.2000    $0.0025        400k  ★ OPTIMAL     Cost/Context Trade-off      
+~deepseek/deepseek-v4-flash-latest    $0.000180     $0.0500     $0.1600    $0.0130       1310k  ★ OPTIMAL     1M Context                  
+google/gemini-2.5-flash-lite:batch    $0.000200     $0.0500     $0.2000    $0.0100       1048k  ★ OPTIMAL     1M Context                  
+poolside/laguna-s-2.1                 $0.000270     $0.0900     $0.1800    $0.0090       1048k  ★ OPTIMAL     1M Context                  
+meta/muse-spark-1.3-contributor       $0.000300     $0.1000     $0.2000    $0.0020       1048k  ★ OPTIMAL     1M Context • Cheapest Cache Read
+x-ai/grok-4.20                        $0.003750     $1.2500     $2.5000    $0.2000       2000k  ★ OPTIMAL     Max Context (2000k)         
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+---
+
 ## ProviderUtility Scoring Mathematical Model
 
 ### 1. Token Cost Term
