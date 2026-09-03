@@ -1,38 +1,37 @@
-"""
-OpenRouter Analytics: A Python tool suite to inspect 24h provider stats, cache hit rates,
-effective pricing, latency, throughput (TPS), uptime, and cost/utility scoring.
-"""
+"""OpenRouter Analytics: 24h provider stats, cache hit rates, pricing, and cost/utility scoring."""
 
-from .models import ProviderStats, ModelStats
-from .resolver import resolve_model, search_models, ModelResolutionError
-from .scoring import (
-    ScoringConfig,
-    EndpointPricing,
-    ScoreBreakdown,
-    evaluate_endpoint,
-)
 from .client import (
     OpenRouterAnalytics,
     OpenRouterAnalyticsError,
-    get_model_stats,
     get_cache_hit_rate,
+    get_model_stats,
     score_model_providers,
 )
+from .models import ModelStats, ProviderStats
+from .pareto import Objective, annotate_frontier, cost_quality_frontier, pareto_mask
+from .resolver import ModelResolutionError, get_all_models, resolve_model, search_models
+from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint, shrink_hit_rate
 
 __version__ = "0.2.0"
 __all__ = [
-    "ProviderStats",
-    "ModelStats",
-    "resolve_model",
-    "search_models",
-    "ModelResolutionError",
-    "ScoringConfig",
-    "EndpointPricing",
-    "ScoreBreakdown",
-    "evaluate_endpoint",
     "OpenRouterAnalytics",
     "OpenRouterAnalyticsError",
     "get_model_stats",
     "get_cache_hit_rate",
     "score_model_providers",
+    "ModelStats",
+    "ProviderStats",
+    "Objective",
+    "pareto_mask",
+    "cost_quality_frontier",
+    "annotate_frontier",
+    "ModelResolutionError",
+    "get_all_models",
+    "resolve_model",
+    "search_models",
+    "EndpointPricing",
+    "ScoreBreakdown",
+    "ScoringConfig",
+    "evaluate_endpoint",
+    "shrink_hit_rate",
 ]

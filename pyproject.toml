@@ -4,18 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openrouter-analytics"
-version = "0.1.0"
-description = "A Python tool suite to inspect OpenRouter 24h provider stats, cache hit rates, effective pricing, and token shares."
+version = "0.2.0"
+description = "Inspect OpenRouter 24h provider stats (cache hit rate, latency, throughput, uptime, pricing) and rank providers and models with a cost/utility scoring model and Pareto frontier analysis."
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [
-    { name = "OpenRouter Analytics Contributor" }
-]
+license = { text = "MIT" }
+authors = [{ name = "Matthew" }]
 dependencies = [
     "requests>=2.28.0",
     "rich>=13.0.0",
-    "click>=8.0.0"
+    "click>=8.0.0",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
 
 [project.scripts]
 openrouter-analytics = "openrouter_analytics.cli:main"
@@ -23,3 +25,6 @@ or-analytics = "openrouter_analytics.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openrouter_analytics"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

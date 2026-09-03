@@ -1,589 +1,394 @@
 #!/usr/bin/env python3
-"""
-openrouter-tui - Interactive Terminal UI for OpenRouter Analytics.
+"""openrouter-tui - interactive terminal explorer for OpenRouter models and providers.
 
-Features:
-  - Alternate Screen Buffer (\x1b[?1049h) - removes console buffer at top, restores on exit.
-  - Model Explorer sorted by the Cost vs. Quality Pareto Frontier
-    (powered by live OpenRouter / Artificial Analysis benchmark scores).
-    Top models are on the frontier from lowest cost to highest, highlighting the KNEE point,
-    followed by dominated models ordered by distance from the frontier.
-  - Real-time delimiter-agnostic fuzzy searching ('zai' matches 'z-ai' and 'z.ai',
-    'glm53' matches 'glm-5.3-flash', 'claude' matches 'anthropic/claude-*').
-  - Up/Down navigation (supports standard ANSI \x1b[A/\x1b[B, SS3 \x1bOA/\x1bOB, Ctrl-P/N,
-    PgUp/PgDn, and mouse scroll/click).
-  - Press Tab to toggle benchmark metric: Intelligence Index vs. Coding Index.
-  - Transitions cleanly clear the buffer (\x1b[2J\x1b[H).
-  - Provider scoring view when a model is selected, showing all endpoints ranked by
-    ProviderUtility scored cost per turn (cache hit rates, shrinkage, latency, TPS, uptime).
+Views:
+  1. Models     - the catalog ranked by the cost vs. quality Pareto frontier (frontier models
+                  first, cheapest to most expensive, with the knee highlighted; then dominated
+                  models by distance to the frontier). Type to fuzzy-filter; Tab toggles the
+                  benchmark metric between intelligence and coding.
+  2. Providers  - Enter on a model lists its endpoints ranked by ProviderUtility scored cost.
+                  Tab or 'a' toggles between the primary quantization and all variants.
+  3. Detail     - Enter on a provider shows the full cost breakdown and pricing.
+
+Keys: Up/Down or Ctrl-P/N move, PgUp/PgDn jump 5, mouse wheel/click, Enter select,
+Esc/Backspace back (Esc clears the search first), Ctrl-C quit.
+
+Runs in the alternate screen buffer so the normal terminal scrollback is untouched.
 """
 
-import sys
 import os
-import re
-import math
-import glob
-import json
-import tty
-import termios
 import select
 import shutil
-from typing import Optional, List, Dict, Any, Tuple
+import sys
+import termios
+import tty
+from typing import Any, Dict, List, Optional, Tuple
 
-# Optimize connection on macOS (avoid IPv6 timeout)
-try:
-    import urllib3.util.connection
-    import socket
-    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
-except Exception:
-    pass
+import _bootstrap  # noqa: F401
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
-
-possible_venvs = [
-    os.path.join(SCRIPT_DIR, ".venv/lib/python*/site-packages"),
-    os.path.expanduser("~/git/openrouter-analytics/.venv/lib/python*/site-packages"),
-]
-for p in possible_venvs:
-    matches = glob.glob(p)
-    if matches:
-        sys.path.insert(0, matches[0])
-        break
-
-from openrouter_analytics.resolver import resolve_model
+from model_frontier import build_candidates, load_data
+from openrouter_analytics._util import filter_primary_quantization
 from openrouter_analytics.client import score_model_providers
-from openrouter_analytics.scoring import ScoringConfig, ScoreBreakdown
-from pareto_frontier import load_catalog_pricing, load_benchmarks, compute_pareto, strip_date_suffix
+from openrouter_analytics.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
+from openrouter_analytics.render import Column, fmt_pct, fmt_seconds, fmt_tps, format_row, header_line
+from openrouter_analytics.scoring import ScoreBreakdown, ScoringConfig
+
+from get_models import clean_str
+
+# ANSI helpers
+ALT_SCREEN_ON = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h"
+ALT_SCREEN_OFF = "\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"
+HOME = "\x1b[H"
+CLEAR_BELOW = "\x1b[J"
+RESET = "\x1b[0m"
+DIM = "\x1b[2m"
+BOLD = "\x1b[1m"
+GREEN = "\x1b[32m"
+BOLD_YELLOW = "\x1b[1;33m"
+HILITE = "\x1b[48;5;237;1m"
+
+KEYS_UP = ("\x1b[A", "\x1bOA", "\x10")
+KEYS_DOWN = ("\x1b[B", "\x1bOB", "\x0e")
+KEYS_PGUP = ("\x1b[1;5A", "\x1b[1;6A", "\x1b[1;2A", "\x1b[1;3A", "\x1b[1;9A", "\x1b\x1b[A", "\x1b[5~")
+KEYS_PGDN = ("\x1b[1;5B", "\x1b[1;6B", "\x1b[1;2B", "\x1b[1;3B", "\x1b[1;9B", "\x1b\x1b[B", "\x1b[6~")
+KEYS_ENTER = ("\r", "\n")
+KEYS_BACKSPACE = ("\x7f", "\x08")
+KEY_ESC = "\x1b"
+KEY_CTRL_C = "\x03"
+PAGE = 5
+TABLE_FIRST_ROW = 4  # 1-based terminal row of the first data row (bar, header, rule above it)
 
 
-# ==============================================================================
-# Helper Math & Data
-# ==============================================================================
-
-def clean_str(s: str) -> str:
-    """Removes all non-alphanumeric characters and lowercases the string."""
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
+# ------------------------------------------------------------------ data
 
 def matches_query(query: str, m: Dict[str, Any]) -> bool:
-    """Fuzzy punctuation-agnostic word match: all query words must match."""
+    """Every whitespace-separated word must appear in the id+name, ignoring punctuation."""
     if not query.strip():
         return True
-    words = query.strip().lower().split()
-    target_raw = f"{m['id']} {m['name']}".lower()
-    target_clean = clean_str(target_raw)
-
-    for w in words:
-        if "flsh" in w:
-            w = w.replace("flsh", "flash")
-        w_clean = clean_str(w)
-        if (w not in target_raw) and (not w_clean or w_clean not in target_clean):
+    raw = f"{m['id']} {m['name']}".lower()
+    cleaned = clean_str(raw)
+    for w in query.lower().split():
+        w = w.replace("flsh", "flash")
+        if w not in raw and clean_str(w) not in cleaned:
             return False
     return True
 
 
-def build_pareto_model_catalog(metric: str = "intelligence") -> Tuple[List[Dict[str, Any]], int]:
-    """Loads catalog pricing and live benchmarks, then computes the Cost vs Quality Pareto frontier."""
-    catalog = load_catalog_pricing()
-    bench_items, weighted_prices = load_benchmarks(None, metric)
-
-    score_key = f"{metric}_index"
-    candidates = []
-    seen_slugs = set()
-
-    for item in bench_items:
-        score = item.get(score_key)
-        if score is None or score <= 0:
-            continue
-
-        permaslug = item.get("model_permaslug") or item.get("uid") or ""
-        base_id = strip_date_suffix(permaslug)
-
-        if base_id in seen_slugs:
-            continue
-
-        cat_entry = catalog.get(base_id) or catalog.get(permaslug)
-        if not cat_entry or cat_entry["prompt_per_m"] <= 0:
-            continue
-
-        candidates.append({
-            "id": base_id,
-            "permaslug": permaslug,
-            "name": item.get("display_name") or cat_entry["name"],
-            "score": float(score),
-            "cost": cat_entry["prompt_per_m"],
-            "prompt_p": cat_entry["prompt_per_m"],
-            "compl_p": cat_entry["completion_per_m"],
-            "metric": metric,
-        })
-        seen_slugs.add(base_id)
-
-    frontier, knee_idx = compute_pareto(candidates)
-    frontier_ids = {m["id"] for m in frontier}
-
-    for item in candidates:
-        item["on_frontier"] = item["id"] in frontier_ids
-        item["is_knee"] = knee_idx is not None and item["id"] == frontier[knee_idx]["id"]
-
-    if frontier:
-        for item in candidates:
-            if item["on_frontier"]:
-                item["dist"] = 0.0
-            else:
-                better_scores = [f["score"] for f in frontier if f["cost"] <= item["cost"]]
-                if better_scores:
-                    item["dist"] = max(better_scores) - item["score"]
-                else:
-                    item["dist"] = 1.0
-
-    # Sort: frontier first by cost ascending, then dominated by distance to frontier ascending
-    candidates.sort(key=lambda x: (not x["on_frontier"], x["cost"] if x["on_frontier"] else x["dist"]))
+def build_model_list(metric: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Benchmarked models sorted by frontier position; returns ``(models, frontier_size)``."""
+    catalog, raw_bench = load_data()
+    candidates = build_candidates(catalog, raw_bench, metric, price_source="list")
+    frontier, knee = cost_quality_frontier(candidates)
+    annotate_frontier(candidates, frontier, knee)
+    candidates.sort(key=frontier_sort_key)
     return candidates, len(frontier)
 
 
-# ==============================================================================
-# Raw Terminal Keyboard Input
-# ==============================================================================
+# ------------------------------------------------------------------ terminal I/O
 
 def get_key() -> str:
-    """Reads interactive keypresses and full escape sequences from raw terminal mode."""
+    """Read one keypress, returning full escape sequences as a single string."""
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
         select.select([fd], [], [])
-        ch = os.read(fd, 1).decode("utf-8", errors="ignore")
-        if ch == "\x1b":
-            seq = ch
-            while True:
-                r, _, _ = select.select([fd], [], [], 0.02)
-                if r:
-                    more = os.read(fd, 64).decode("utf-8", errors="ignore")
-                    if not more:
-                        break
-                    seq += more
-                else:
+        seq = os.read(fd, 1).decode("utf-8", errors="ignore")
+        if seq == KEY_ESC:
+            while select.select([fd], [], [], 0.02)[0]:
+                more = os.read(fd, 64).decode("utf-8", errors="ignore")
+                if not more:
                     break
-            return seq
+                seq += more
+        return seq
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    return ch
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def clear_buffer():
-    """Clears the terminal screen buffer and homes the cursor to (1, 1)."""
-    sys.stdout.write("\x1b[2J\x1b[H")
+def clear_screen() -> None:
+    sys.stdout.write("\x1b[2J" + HOME)
     sys.stdout.flush()
 
 
-# ==============================================================================
-# Terminal Interactive TUI Loop
-# ==============================================================================
+def write(s: str = "") -> None:
+    sys.stdout.write(s + "\n")
 
-def run_tui():
-    current_metric = "intelligence"
-    models, frontier_count = build_pareto_model_catalog(current_metric)
 
-    current_view = "MODELS"  # "MODELS", "PROVIDERS", "DETAIL"
+def parse_mouse(key: str) -> Optional[Tuple[int, int, int, bool]]:
+    """Decode an SGR mouse report into ``(button, col, row, is_release)``."""
+    if not key.startswith("\x1b[<"):
+        return None
+    try:
+        parts = key[3:-1].split(";")
+        return int(parts[0]), int(parts[1]), int(parts[2]), key.endswith("m")
+    except (ValueError, IndexError):
+        return None
+
+
+def navigate(key: str, idx: int, count: int, scroll: int, visible: int) -> Tuple[Optional[int], bool]:
+    """Apply a navigation key. Returns ``(new_index_or_None, clicked_current_row)``."""
+    last = max(0, count - 1)
+    if key in KEYS_UP:
+        return max(0, idx - 1), False
+    if key in KEYS_DOWN:
+        return min(last, idx + 1), False
+    if key in KEYS_PGUP:
+        return max(0, idx - PAGE), False
+    if key in KEYS_PGDN:
+        return min(last, idx + PAGE), False
+    mouse = parse_mouse(key)
+    if mouse:
+        button, _, row, released = mouse
+        if button in (64, 68):
+            return max(0, idx - PAGE), False
+        if button in (65, 69):
+            return min(last, idx + PAGE), False
+        if button == 0 and not released and TABLE_FIRST_ROW <= row < TABLE_FIRST_ROW + visible:
+            clicked = scroll + (row - TABLE_FIRST_ROW)
+            if 0 <= clicked < count:
+                return clicked, clicked == idx
+        return idx, False
+    return None, False
+
+
+def scroll_window(idx: int, scroll: int, count: int, viewport: int) -> Tuple[int, int]:
+    """Return ``(scroll_offset, num_visible)`` keeping ``idx`` inside the viewport."""
+    visible = min(count, viewport)
+    if idx < scroll:
+        scroll = idx
+    elif idx >= scroll + visible:
+        scroll = max(0, idx - visible + 1)
+    return scroll, visible
+
+
+def pad_rows(rendered: int, viewport: int) -> None:
+    for _ in range(viewport - rendered):
+        write()
+
+
+# ------------------------------------------------------------------ views
+
+MODEL_COLS_BASE = [Column("Status", 14), Column("Model Name", 32), Column("Model ID", 30)]
+PROVIDER_COLS = [
+    Column("Provider", 16),
+    Column("Scored Cost", 12, ">"),
+    Column("Token Cost", 11, ">"),
+    Column("Fail Risk", 10, ">"),
+    Column("CacheHit", 8, ">"),
+    Column("Latency", 8, ">"),
+    Column("TPS", 5, ">"),
+    Column("Uptime", 7, ">"),
+    Column("Hit $/M", 9, ">"),
+    Column("Miss $/M", 9, ">"),
+]
+
+
+def _usd(v: float) -> str:
+    return f"${v:.4f}" if v < 0.1 else f"${v:.2f}"
+
+
+def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewport) -> Tuple[List[Dict[str, Any]], int, int]:
+    filtered = [m for m in models if matches_query(query, m)] if query else models
+    idx = min(idx, len(filtered) - 1) if filtered else 0
+    scroll, visible = scroll_window(idx, scroll, len(filtered), viewport)
+
+    sys.stdout.write(HOME)
+    prompt = f"Search Models: {query}█"
+    status = f"[{len(filtered)}/{len(models)} models | {frontier_count} on frontier | metric: {metric}]"
+    gap = " " * max(2, width - len(prompt) - len(status) - 2)
+    write(f"\x1b[1;36m{prompt}{RESET}{gap}{DIM}{status}{RESET}")
+
+    cols = MODEL_COLS_BASE + [Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
+                              Column("Prompt $/M", 12, ">"), Column("Output $/M", 11, ">")]
+    head = header_line(cols)
+    write(f"{BOLD}{head[:width - 1]}{RESET}")
+    write("─" * min(width - 1, len(head)))
+
+    if not filtered:
+        write(f"{DIM}  (no models matching '{query}'){RESET}")
+        pad_rows(1, viewport)
+    else:
+        end = min(len(filtered), scroll + visible)
+        for i in range(scroll, end):
+            m = filtered[i]
+            knee, front = m["is_knee"], m["on_frontier"]
+            status = "★ KNEE" if knee else "★ OPTIMAL" if front else f"-{m['dist']:.1f} pts"
+            line = format_row(
+                [status, m["name"][:32], m["id"][:30], f"{m['score']:.1f}", _usd(m["cost"]), _usd(m["compl_p"] or 0.0)],
+                cols,
+            )[: width - 1]
+            if i == idx:
+                colour = HILITE + ("\x1b[33m" if knee else "\x1b[32m" if front else "")
+                write(f"{colour}{line}{RESET}")
+            elif knee:
+                write(f"{BOLD_YELLOW}{line[:14]}{RESET}{line[14:]}")
+            elif front:
+                write(f"{GREEN}{line[:14]}{RESET}{line[14:]}")
+            else:
+                write(f"{DIM}{line}{RESET}")
+        pad_rows(end - scroll, viewport)
+
+    write(f"\n{DIM}Enter: providers  •  Tab: toggle metric  •  Up/Down: move  •  Esc: clear / exit{RESET}"[: width + 8])
+    write(f"{DIM}Cost vs. quality Pareto frontier. ★ KNEE = best quality gain per dollar; '-N pts' = gap to frontier.{RESET}"[: width + 8])
+    sys.stdout.write(CLEAR_BELOW)
+    sys.stdout.flush()
+    return filtered, idx, scroll
+
+
+def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> Tuple[List[ScoreBreakdown], int, int]:
+    active = filter_primary_quantization(scores, all_quants)
+    idx = min(idx, len(active) - 1) if active else 0
+    scroll, visible = scroll_window(idx, scroll, len(active), viewport)
+
+    sys.stdout.write(HOME)
+    quant_tag = "[quants: ALL]" if all_quants else "[quants: primary]"
+    write(f"Providers for: \x1b[1;36m{model['name']}{RESET} ({model['id']})  •  {quant_tag}"[: width + 12])
+    head = header_line(PROVIDER_COLS)
+    write(f"{BOLD}{head[:width - 1]}{RESET}")
+    write("─" * min(width - 1, len(head)))
+
+    if not active:
+        write(f"{DIM}  (no active providers found for this model){RESET}")
+        pad_rows(1, viewport)
+    else:
+        end = min(len(active), scroll + visible)
+        for i in range(scroll, end):
+            s = active[i]
+            line = format_row(
+                [
+                    s.provider_name[:16], s.formatted_total_cost, s.formatted_token_cost, s.formatted_failure_cost,
+                    s.formatted_h_used, fmt_seconds(s.ttft_seconds), fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct),
+                    f"${s.hit_price:.4f}", f"${s.miss_price:.4f}",
+                ],
+                PROVIDER_COLS,
+            )[: width - 1]
+            best = "\x1b[32m" if i == 0 else ""
+            if i == idx:
+                write(f"{HILITE}{best}{line}{RESET}")
+            else:
+                write(f"{best}{line}{RESET}")
+        pad_rows(end - scroll, viewport)
+
+    write(f"\n{DIM}Esc / Backspace / q: back  •  Tab / a: toggle quants  •  Enter: provider detail{RESET}"[: width + 8])
+    write(f"{DIM}Ranked by ProviderUtility scored cost per turn (2000 prompt + 500 completion tokens). #1 is cheapest.{RESET}"[: width + 8])
+    sys.stdout.write(CLEAR_BELOW)
+    sys.stdout.flush()
+    return active, idx, scroll
+
+
+def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
+    sys.stdout.write(HOME)
+    rule = "─" * min(width - 1, 78)
+    write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})")
+    write(rule)
+    write(f"  Scored Cost per Turn:   \x1b[1;32m{s.formatted_total_cost}{RESET}")
+    write(f"  Token Cost per Turn:    {s.formatted_token_cost}")
+    write(f"  Failure Risk Penalty:   {s.formatted_failure_cost}")
+    write(f"  Time Opportunity Cost:  {s.formatted_time_cost}")
+    write(f"  Prompt Cache Hit Rate:  used {BOLD}{s.formatted_h_used}{RESET}  (published 24h: {s.formatted_h_raw})")
+    write(f"  Cache Read (Hit) Price: ${s.hit_price:.4f} / M tokens")
+    write(f"  Cache Write/Miss Price: ${s.miss_price:.4f} / M tokens")
+    write(f"  Completion Price:       ${s.out_price:.4f} / M tokens")
+    write(f"  Latency (TTFT):         {fmt_seconds(s.ttft_seconds)}  |  Throughput: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
+    write(f"  Quantization Variant:   {s.quantization.upper()}")
+    write(rule)
+    write(f"{DIM}Press any key to return to the providers table.{RESET}")
+    sys.stdout.write(CLEAR_BELOW)
+    sys.stdout.flush()
+
+
+# ------------------------------------------------------------------ main loop
+
+def run_tui() -> None:
+    metric = "intelligence"
+    models, frontier_count = build_model_list(metric)
+
+    view = "MODELS"
     query = ""
-    selected_idx = 0
-    scroll_offset = 0
+    m_idx = m_scroll = 0
+    selected: Optional[Dict[str, Any]] = None
+    scores: List[ScoreBreakdown] = []
+    active: List[ScoreBreakdown] = []
+    p_idx = p_scroll = 0
+    all_quants = False
 
-    # Selected model state
-    selected_model_dict: Optional[Dict[str, Any]] = None
-    provider_scores: List[ScoreBreakdown] = []
-    provider_selected_idx = 0
-    provider_scroll_offset = 0
-    filter_all_quants = False
-
-    # Switch to Alternate Screen Buffer, hide cursor, enable SGR mouse tracking
-    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
-    clear_buffer()
-
+    sys.stdout.write(ALT_SCREEN_ON)
+    clear_screen()
     try:
         while True:
-            term_width, term_height = shutil.get_terminal_size((100, 30))
-            viewport_height = max(2, term_height - 7)
+            width, height = shutil.get_terminal_size((100, 30))
+            viewport = max(2, height - 7)
 
-            # ==================================================================
-            # VIEW 1: MODEL SELECTION LIST
-            # ==================================================================
-            if current_view == "MODELS":
-                filtered_models = [m for m in models if matches_query(query, m)] if query else models
-                selected_idx = max(0, min(selected_idx, len(filtered_models) - 1)) if filtered_models else 0
-
-                num_visible = min(len(filtered_models), viewport_height)
-
-                if selected_idx < scroll_offset:
-                    scroll_offset = selected_idx
-                elif selected_idx >= scroll_offset + num_visible:
-                    scroll_offset = max(0, selected_idx - num_visible + 1)
-
-                # Home cursor to top-left of alternate buffer
-                sys.stdout.write("\x1b[H")
-
-                # 1. Search Bar
-                search_prompt = f"Search Models: {query}█"
-                count_str = f"[{len(filtered_models)}/{len(models)} models | {frontier_count} on Frontier | Metric: {current_metric.upper()}]"
-                space = max(2, term_width - len(search_prompt) - len(count_str) - 2)
-                top_bar = f"\x1b[1;36m{search_prompt}\x1b[0m{' ' * space}\x1b[2m{count_str}\x1b[0m"
-                sys.stdout.write(top_bar[:term_width + 15] + "\n")
-
-                # 2. Table Header
-                metric_label = "Intel Score" if current_metric == "intelligence" else "Coding Score"
-                cols = [
-                    ("Status", 14, "<"),
-                    ("Model Name", 32, "<"),
-                    ("Model ID", 30, "<"),
-                    (metric_label, 12, ">"),
-                    ("Cost ($/1M)", 12, ">"),
-                    ("Output $/M", 11, ">"),
-                ]
-                header_parts = [f"{name:>{w}}" if a == ">" else f"{name:<{w}}" for name, w, a in cols]
-                header_str = "  ".join(header_parts)
-                sys.stdout.write(f"\x1b[1m{header_str[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write("─" * min(term_width - 1, len(header_str)) + "\n")
-
-                # 3. Model Rows (guaranteed to fill viewport_height lines)
-                if not filtered_models:
-                    sys.stdout.write(f"\x1b[2m  (No models matching '{query}')\x1b[0m\n")
-                    for _ in range(viewport_height - 1):
-                        sys.stdout.write("\n")
-                else:
-                    end_idx = min(len(filtered_models), scroll_offset + num_visible)
-                    for i in range(scroll_offset, end_idx):
-                        m = filtered_models[i]
-                        on_f = m["on_frontier"]
-                        is_k = m.get("is_knee", False)
-
-                        if is_k:
-                            status_str = "★ KNEE"
-                        elif on_f:
-                            status_str = "★ OPTIMAL"
-                        else:
-                            status_str = f"-{m['dist']:.1f} pts"
-
-                        cost_str = f"${m['cost']:.4f}" if m['cost'] < 0.1 else f"${m['cost']:.2f}"
-                        compl_str = f"${m['compl_p']:.4f}" if m['compl_p'] < 0.1 else f"${m['compl_p']:.2f}"
-
-                        row_vals = [
-                            status_str,
-                            m["name"][:32],
-                            m["id"][:30],
-                            f"{m['score']:.1f}",
-                            cost_str,
-                            compl_str,
-                        ]
-
-                        line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
-                        line_clipped = line_str[:term_width - 1]
-
-                        if i == selected_idx:
-                            if is_k:
-                                sys.stdout.write(f"\x1b[48;5;237;1;33m{line_clipped}\x1b[0m\n")
-                            elif on_f:
-                                sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
-                            else:
-                                sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
-                        else:
-                            if is_k:
-                                sys.stdout.write(f"\x1b[1;33m★ KNEE\x1b[0m         {line_clipped[15:]}\n")
-                            elif on_f:
-                                sys.stdout.write(f"\x1b[32m★ OPTIMAL\x1b[0m      {line_clipped[15:]}\n")
-                            else:
-                                sys.stdout.write(f"\x1b[2m{line_clipped}\x1b[0m\n")
-
-                    rendered_rows = end_idx - scroll_offset
-                    for _ in range(viewport_height - rendered_rows):
-                        sys.stdout.write("\n")
-
-                # 4. Footer Help
-                footer1 = "Enter: Inspect Providers  •  [Tab]: Toggle Metric (Intel/Coding)  •  Up/Down: Move  •  Esc: Exit"
-                footer2 = "Cost vs. Quality Pareto Frontier: Top models are non-dominated. ★ KNEE = highest quality gain per $."
-                sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write("\x1b[J")
-                sys.stdout.flush()
-
-                # Input event
+            if view == "MODELS":
+                filtered, m_idx, m_scroll = draw_models(models, query, metric, frontier_count, m_idx, m_scroll, width, viewport)
                 key = get_key()
-
-                # Up arrow (ANSI, SS3 application cursor mode, Ctrl-P)
-                if key in ('\x1b[A', '\x1bOA', '\x10'):
-                    selected_idx = max(0, selected_idx - 1)
-                # Down arrow (ANSI, SS3 application cursor mode, Ctrl-N)
-                elif key in ('\x1b[B', '\x1bOB', '\x0e'):
-                    selected_idx = min(len(filtered_models) - 1, selected_idx + 1)
-                # Page Up / Ctrl+Up / Shift+Up (jump 5)
-                elif key in ('\x1b[1;5A', '\x1b[1;6A', '\x1b[1;2A', '\x1b[1;3A', '\x1b[1;9A', '\x1b\x1b[A', '\x1b[5~'):
-                    selected_idx = max(0, selected_idx - 5)
-                # Page Down / Ctrl+Down / Shift+Down (jump 5)
-                elif key in ('\x1b[1;5B', '\x1b[1;6B', '\x1b[1;2B', '\x1b[1;3B', '\x1b[1;9B', '\x1b\x1b[B', '\x1b[6~'):
-                    selected_idx = min(len(filtered_models) - 1, selected_idx + 5)
-                # Mouse event
-                elif key.startswith("\x1b[<"):
-                    try:
-                        is_release = key.endswith("m")
-                        body = key[3:-1]
-                        parts = body.split(";")
-                        if len(parts) >= 3:
-                            cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
-                            if cb in (64, 68):
-                                selected_idx = max(0, selected_idx - 5)
-                            elif cb in (65, 69):
-                                selected_idx = min(len(filtered_models) - 1, selected_idx + 5)
-                            elif cb == 0 and not is_release:
-                                if 4 <= cy < 4 + num_visible:
-                                    clicked_idx = scroll_offset + (cy - 4)
-                                    if 0 <= clicked_idx < len(filtered_models):
-                                        if clicked_idx == selected_idx:
-                                            selected_model_dict = filtered_models[selected_idx]
-                                            current_view = "PROVIDERS"
-                                            clear_buffer()
-                                        else:
-                                            selected_idx = clicked_idx
-                    except Exception:
-                        pass
-                # Toggle Metric via Tab
+                new_idx, clicked = navigate(key, m_idx, len(filtered), m_scroll, min(len(filtered), viewport))
+                if new_idx is not None:
+                    m_idx = new_idx
+                    if clicked and filtered:
+                        selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
+                        clear_screen()
                 elif key == "\t":
-                    current_metric = "coding" if current_metric == "intelligence" else "intelligence"
-                    models, frontier_count = build_pareto_model_catalog(current_metric)
-                    selected_idx = 0
-                    scroll_offset = 0
-                    clear_buffer()
-                # Enter: Transition to Providers
-                elif key in ("\r", "\n"):
-                    if filtered_models:
-                        selected_model_dict = filtered_models[selected_idx]
-                        current_view = "PROVIDERS"
-                        provider_selected_idx = 0
-                        provider_scroll_offset = 0
-                        clear_buffer()
-                # Esc / Ctrl-C
-                elif key in ("\x1b", "\x03"):
-                    if len(query) > 0:
-                        query = ""  # Esc clears search query first
-                        selected_idx = 0
+                    metric = "coding" if metric == "intelligence" else "intelligence"
+                    models, frontier_count = build_model_list(metric)
+                    m_idx = m_scroll = 0
+                    clear_screen()
+                elif key in KEYS_ENTER and filtered:
+                    selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
+                    clear_screen()
+                elif key in (KEY_ESC, KEY_CTRL_C):
+                    if query and key == KEY_ESC:
+                        query, m_idx = "", 0
                     else:
                         break
-                # Backspace / Ctrl-H
-                elif key in ("\x7f", "\x08"):
-                    if len(query) > 0:
-                        query = query[:-1]
-                        selected_idx = 0
-                # Discard unhandled escape sequences (never let them spill into query)
-                elif key.startswith("\x1b"):
-                    pass
-                # Printable characters -> append to fuzzy search bar
+                elif key in KEYS_BACKSPACE:
+                    query, m_idx = query[:-1], 0
                 elif len(key) == 1 and 32 <= ord(key) <= 126:
-                    query += key
-                    selected_idx = 0
+                    query, m_idx = query + key, 0
+                # any other escape sequence is ignored so it never lands in the search box
 
-            # ==================================================================
-            # VIEW 2: PROVIDER SCORING VIEW
-            # ==================================================================
-            elif current_view == "PROVIDERS":
-                if selected_model_dict and not provider_scores:
-                    clear_buffer()
-                    sys.stdout.write(f"Fetching provider analytics for {selected_model_dict['id']}...\n")
+            elif view == "PROVIDERS":
+                assert selected is not None
+                if not scores:
+                    clear_screen()
+                    write(f"Fetching provider analytics for {selected['id']}...")
                     sys.stdout.flush()
-                    cfg = ScoringConfig(prompt_tokens=2000, completion_tokens=500, time_value_usd_per_hour=0.0, price_failures=True)
-                    provider_scores = score_model_providers(selected_model_dict["permaslug"], config=cfg)
-                    clear_buffer()
-
-                # Apply quantization filter
-                active_scores = []
-                primary_quant = "fp8" if any(getattr(s, "quantization", "") == "fp8" for s in provider_scores) else None
-                for s in provider_scores:
-                    q = getattr(s, "quantization", "unknown") or "unknown"
-                    if not filter_all_quants and primary_quant and q != primary_quant:
-                        continue
-                    active_scores.append(s)
-
-                provider_selected_idx = max(0, min(provider_selected_idx, len(active_scores) - 1)) if active_scores else 0
-                num_visible = min(len(active_scores), viewport_height)
-
-                if provider_selected_idx < provider_scroll_offset:
-                    provider_scroll_offset = provider_selected_idx
-                elif provider_selected_idx >= provider_scroll_offset + num_visible:
-                    provider_scroll_offset = max(0, provider_selected_idx - num_visible + 1)
-
-                sys.stdout.write("\x1b[H")
-
-                # Header Banner
-                m_title = selected_model_dict.get("name", selected_model_dict["id"])
-                quant_tag = "[Filter: ALL QUANTS]" if filter_all_quants else (f"[Filter: {primary_quant.upper()}]" if primary_quant else "[Filter: ALL]")
-                banner = f"Providers for: \x1b[1;36m{m_title}\x1b[0m ({selected_model_dict['id']})  •  {quant_tag}"
-                sys.stdout.write(f"{banner[:term_width + 15]}\n")
-
-                # Table Header
-                cols = [
-                    ("Provider", 16, "<"),
-                    ("Scored Cost", 12, ">"),
-                    ("Token Cost", 11, ">"),
-                    ("Fail Risk", 10, ">"),
-                    ("CacheHit", 8, ">"),
-                    ("Latency", 8, ">"),
-                    ("TPS", 5, ">"),
-                    ("Uptime", 7, ">"),
-                    ("Hit $/M", 9, ">"),
-                    ("Miss $/M", 9, ">"),
-                ]
-                header_parts = [f"{name:>{w}}" if a == ">" else f"{name:<{w}}" for name, w, a in cols]
-                header_str = "  ".join(header_parts)
-                sys.stdout.write(f"\x1b[1m{header_str[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write("─" * min(term_width - 1, len(header_str)) + "\n")
-
-                # Provider Rows
-                if not active_scores:
-                    sys.stdout.write(f"\x1b[2m  (No active providers found for this model)\x1b[0m\n")
-                    for _ in range(viewport_height - 1):
-                        sys.stdout.write("\n")
-                else:
-                    end_idx = min(len(active_scores), provider_scroll_offset + num_visible)
-                    for i in range(provider_scroll_offset, end_idx):
-                        s = active_scores[i]
-                        lat_str = f"{s.ttft_seconds:.2f}s" if s.ttft_seconds else "--"
-                        tps_str = f"{s.throughput_tps:.0f}" if s.throughput_tps else "--"
-                        upt_str = f"{s.uptime_pct:.1f}%" if s.uptime_pct else "--"
-
-                        row_vals = [
-                            s.provider_name[:16],
-                            f"${s.total_cost_usd:.6f}",
-                            f"${s.token_cost_usd:.6f}",
-                            f"${s.failure_cost_usd:.6f}",
-                            f"{s.h_used * 100:.1f}%",
-                            lat_str,
-                            tps_str,
-                            upt_str,
-                            f"${s.hit_price:.4f}",
-                            f"${s.miss_price:.4f}",
-                        ]
-
-                        line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
-                        line_clipped = line_str[:term_width - 1]
-
-                        if i == provider_selected_idx:
-                            if i == 0:
-                                sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
-                            else:
-                                sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
-                        else:
-                            if i == 0:
-                                sys.stdout.write(f"\x1b[32m{line_clipped}\x1b[0m\n")
-                            else:
-                                sys.stdout.write(f"{line_clipped}\n")
-
-                    rendered_rows = end_idx - provider_scroll_offset
-                    for _ in range(viewport_height - rendered_rows):
-                        sys.stdout.write("\n")
-
-                # Footer Help
-                footer1 = "Esc / Backspace / q: Back to Models  •  Tab / a: Toggle Quants  •  Enter: Provider Spec Card"
-                footer2 = "Providers ranked by ProviderUtility Scored Cost. #1 provides optimal economic turn utility."
-                sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write("\x1b[J")
-                sys.stdout.flush()
-
-                # Input event
+                    scores = score_model_providers(selected["permaslug"], config=ScoringConfig())
+                    clear_screen()
+                active, p_idx, p_scroll = draw_providers(selected, scores, all_quants, p_idx, p_scroll, width, viewport)
                 key = get_key()
-
-                # Up arrow (ANSI, SS3, Ctrl-P)
-                if key in ('\x1b[A', '\x1bOA', '\x10'):
-                    provider_selected_idx = max(0, provider_selected_idx - 1)
-                # Down arrow (ANSI, SS3, Ctrl-N)
-                elif key in ('\x1b[B', '\x1bOB', '\x0e'):
-                    provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 1)
-                # Page Up / Ctrl+Up / Shift+Up (jump 5)
-                elif key in ('\x1b[1;5A', '\x1b[1;6A', '\x1b[1;2A', '\x1b[1;3A', '\x1b[1;9A', '\x1b\x1b[A', '\x1b[5~'):
-                    provider_selected_idx = max(0, provider_selected_idx - 5)
-                # Page Down / Ctrl+Down / Shift+Down (jump 5)
-                elif key in ('\x1b[1;5B', '\x1b[1;6B', '\x1b[1;2B', '\x1b[1;3B', '\x1b[1;9B', '\x1b\x1b[B', '\x1b[6~'):
-                    provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 5)
-                # Mouse event
-                elif key.startswith("\x1b[<"):
-                    try:
-                        is_release = key.endswith("m")
-                        body = key[3:-1]
-                        parts = body.split(";")
-                        if len(parts) >= 3:
-                            cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
-                            if cb in (64, 68):
-                                provider_selected_idx = max(0, provider_selected_idx - 5)
-                            elif cb in (65, 69):
-                                provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 5)
-                            elif cb == 0 and not is_release:
-                                if 4 <= cy < 4 + num_visible:
-                                    clicked_idx = provider_scroll_offset + (cy - 4)
-                                    if 0 <= clicked_idx < len(active_scores):
-                                        provider_selected_idx = clicked_idx
-                    except Exception:
-                        pass
-                # Toggle Quants
+                new_idx, clicked = navigate(key, p_idx, len(active), p_scroll, min(len(active), viewport))
+                if new_idx is not None:
+                    p_idx = new_idx
+                    if clicked and active:
+                        view = "DETAIL"
+                        clear_screen()
                 elif key in ("\t", "a", "A"):
-                    filter_all_quants = not filter_all_quants
-                    provider_selected_idx = 0
-                    provider_scroll_offset = 0
-                    clear_buffer()
-                # Return to Models
-                elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D", "\x1bOD"):
-                    current_view = "MODELS"
-                    provider_scores = []
-                    clear_buffer()
-                # Enter: Detail Spec Card
-                elif key in ("\r", "\n"):
-                    if active_scores:
-                        current_view = "DETAIL"
-                        clear_buffer()
-                elif key == "\x03":
+                    all_quants = not all_quants
+                    p_idx = p_scroll = 0
+                    clear_screen()
+                elif key in (KEY_ESC, "q", "Q", "\x1b[D", "\x1bOD") or key in KEYS_BACKSPACE:
+                    view, scores = "MODELS", []
+                    clear_screen()
+                elif key in KEYS_ENTER and active:
+                    view = "DETAIL"
+                    clear_screen()
+                elif key == KEY_CTRL_C:
                     break
-                elif key.startswith("\x1b"):
-                    pass
 
-            # ==================================================================
-            # VIEW 3: PROVIDER SPEC DETAIL POPUP
-            # ==================================================================
-            elif current_view == "DETAIL":
-                p_stat = active_scores[provider_selected_idx]
-
-                sys.stdout.write("\x1b[H")
-                divider = "─" * min(term_width - 1, 78)
-                sys.stdout.write(f"\x1b[1;36mProvider Detail: {p_stat.provider_name}\x1b[0m  (for {selected_model_dict['id']})\n")
-                sys.stdout.write(divider + "\n")
-                sys.stdout.write(f"  Scored Cost per Turn:   \x1b[1;32m${p_stat.total_cost_usd:.6f}\x1b[0m\n")
-                sys.stdout.write(f"  Token Cost per Turn:    ${p_stat.token_cost_usd:.6f}\n")
-                sys.stdout.write(f"  Failure Risk Penalty:   ${p_stat.failure_cost_usd:.6f}\n")
-                sys.stdout.write(f"  Time Opportunity Cost:  ${p_stat.time_cost_usd:.6f}\n")
-                sys.stdout.write(f"  Prompt Cache Hit Rate:  Used: \x1b[1m{p_stat.h_used * 100:.1f}%\x1b[0m  (Observed 24h: {p_stat.h_raw * 100:.1f}%)\n")
-                sys.stdout.write(f"  Cache Read (Hit) Price: ${p_stat.hit_price:.4f} / M tokens\n")
-                sys.stdout.write(f"  Cache Write/Miss Price: ${p_stat.miss_price:.4f} / M tokens\n")
-                sys.stdout.write(f"  Completion Price:       ${p_stat.out_price:.4f} / M tokens\n")
-                lat_str = f"{p_stat.ttft_seconds:.2f}s" if p_stat.ttft_seconds else "--"
-                tps_str = f"{p_stat.throughput_tps:.0f} TPS" if p_stat.throughput_tps else "--"
-                upt_str = f"{p_stat.uptime_pct:.1f}%" if p_stat.uptime_pct else "--"
-                sys.stdout.write(f"  Latency (TTFT):         {lat_str}  |  Throughput: {tps_str}  |  Uptime: {upt_str}\n")
-                q_str = getattr(p_stat, "quantization", "unknown")
-                sys.stdout.write(f"  Quantization Variant:   {q_str.upper()}\n")
-                sys.stdout.write(divider + "\n")
-                sys.stdout.write("\x1b[2mPress any key, Esc, or Enter to return to providers table...\x1b[0m\n")
-                sys.stdout.write("\x1b[J")
-                sys.stdout.flush()
-
-                key = get_key()
-                if key == "\x03":
+            else:  # DETAIL
+                assert selected is not None
+                draw_detail(active[p_idx], selected["id"], width)
+                if get_key() == KEY_CTRL_C:
                     break
-                current_view = "PROVIDERS"
-                clear_buffer()
-
+                view = "PROVIDERS"
+                clear_screen()
     finally:
-        # Restore normal screen buffer, show cursor, disable mouse
-        sys.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+        sys.stdout.write(ALT_SCREEN_OFF)
         sys.stdout.flush()
 
 
-def main():
+def main() -> None:
     try:
         run_tui()
     except (KeyboardInterrupt, SystemExit):

@@ -1,155 +1,123 @@
-import os
-import json
-import time
-import socket
+"""Model catalog retrieval and fuzzy model-name resolution."""
+
 import difflib
-from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+import re
+from typing import Any, Dict, List, Tuple
+
 import requests
 
-try:
-    import urllib3.util.connection
-    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
-except Exception:
-    pass
+from ._util import CACHE_DIR, force_ipv4, load_json_cache, save_json_cache
 
+force_ipv4()
 
-CACHE_DIR = Path.home() / ".cache" / "openrouter_analytics"
-CACHE_FILE = CACHE_DIR / "models.json"
-CACHE_TTL = 3600  # 1 hour
+MODELS_URL = "https://openrouter.ai/api/v1/models"
+MODELS_CACHE_FILE = CACHE_DIR / "models.json"
+MODELS_CACHE_TTL = 3600  # the catalog changes rarely; 1 hour
 
 
 class ModelResolutionError(Exception):
-    """Raised when a model cannot be resolved to an OpenRouter permaslug."""
-    pass
+    """Raised when a query cannot be matched to any OpenRouter model."""
 
 
 def _fetch_models_from_api() -> List[Dict[str, Any]]:
-    url = "https://openrouter.ai/api/v1/models"
-    headers = {"User-Agent": "openrouter-analytics-python/0.1"}
-    resp = requests.get(url, headers=headers, timeout=15)
+    resp = requests.get(MODELS_URL, headers={"User-Agent": "openrouter-analytics-python"}, timeout=15)
     resp.raise_for_status()
     return resp.json().get("data", [])
 
 
 def get_all_models(force_refresh: bool = False) -> List[Dict[str, Any]]:
-    """Retrieve all models from OpenRouter with disk-based caching."""
-    if not force_refresh and CACHE_FILE.exists():
-        try:
-            mtime = CACHE_FILE.stat().st_mtime
-            if (time.time() - mtime) < CACHE_TTL:
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
+    """Return the full model catalog, served from a 1-hour disk cache when possible.
 
+    If the network request fails, a stale cache is returned rather than raising.
+    """
+    if not force_refresh:
+        cached = load_json_cache(MODELS_CACHE_FILE, MODELS_CACHE_TTL)
+        if cached is not None:
+            return cached
     try:
         models = _fetch_models_from_api()
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(models, f)
-        return models
     except Exception as e:
-        if CACHE_FILE.exists():
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+        stale = load_json_cache(MODELS_CACHE_FILE, ttl=10**12)
+        if stale is not None:
+            return stale
         raise ModelResolutionError(f"Failed to fetch model list from OpenRouter: {e}")
+    save_json_cache(MODELS_CACHE_FILE, models)
+    return models
+
+
+_CREATOR_FIXES = [
+    (re.compile(r"^z[\.\-_]?ai(?=/|$)"), "z-ai"),
+    (re.compile(r"^meta[\.\-_]llama(?=/|$)"), "meta-llama"),
+]
 
 
 def _normalize_query(q: str) -> str:
-    """Normalize input strings, correcting common domain/separator substitutions."""
+    """Lowercase and repair common creator-prefix and typo variants (z.ai, zai, flsh)."""
     q = q.strip().lower()
-    import re
-    # Normalize creator prefixes (z.ai -> z-ai, zai/ -> z-ai/)
-    q = re.sub(r"^z[\.\-_]ai(/|$)", r"z-ai", q)
-    q = re.sub(r"^zai(/|$)", r"z-ai", q)
-    q = re.sub(r"^meta[\.\-_]llama(/|$)", r"meta-llama", q)
-    # Common typo: flsh -> flash
-    if "flsh" in q:
-        q = q.replace("flsh", "flash")
-    return q
+    for pattern, repl in _CREATOR_FIXES:
+        q = pattern.sub(repl, q)
+    return q.replace("flsh", "flash")
+
+
+def _describe(m: Dict[str, Any]) -> Tuple[str, str, str]:
+    return m["id"], m.get("canonical_slug") or m["id"], m.get("name") or m["id"]
 
 
 def resolve_model(query: str) -> Tuple[str, str, str]:
-    """
-    Resolve any query string into:
-    (model_id, canonical_permaslug, display_name)
+    """Resolve a user-supplied model string to ``(model_id, canonical_permaslug, display_name)``.
 
-    Accepts:
-    - Full slugs (e.g. 'z-ai/glm-5.3-flash', 'anthropic/claude-3.7-sonnet')
-    - Canonical slugs (e.g. 'z-ai/glm-5.3-flash-20260826')
-    - Short names (e.g. 'glm-5.3-flash', 'claude-3.7-sonnet', 'gpt-4o')
-    - Fuzzy/typo matches (e.g. 'z.ai/glm-5.3-flsh')
+    Matching order: exact id or permaslug; exact short name without creator prefix;
+    substring (preferring ids that end with the query, then the shortest id); finally a
+    difflib fuzzy match against full and short ids.
     """
     norm = _normalize_query(query)
     models = get_all_models()
 
-    # 1. Exact matches on id or canonical_slug
+    def mid(m: Dict[str, Any]) -> str:
+        return m.get("id", "").lower()
+
+    def slug(m: Dict[str, Any]) -> str:
+        return (m.get("canonical_slug") or m.get("id", "")).lower()
+
+    def short(m: Dict[str, Any]) -> str:
+        return mid(m).rsplit("/", 1)[-1]
+
     for m in models:
-        m_id = m.get("id", "").lower()
-        c_slug = (m.get("canonical_slug") or m_id).lower()
-        if norm in (m_id, c_slug):
-            return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
+        if norm in (mid(m), slug(m)):
+            return _describe(m)
 
-    # 2. Match without author prefix (e.g. 'glm-5.3-flash' matches 'z-ai/glm-5.3-flash')
     for m in models:
-        m_id = m.get("id", "").lower()
-        c_slug = (m.get("canonical_slug") or m_id).lower()
-        short_id = m_id.split("/")[-1] if "/" in m_id else m_id
-        if norm == short_id:
-            return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
+        if norm == short(m):
+            return _describe(m)
 
-    # 3. Substring match on id
-    candidates = []
-    for m in models:
-        m_id = m.get("id", "").lower()
-        c_slug = (m.get("canonical_slug") or m_id).lower()
-        name = m.get("name", "").lower()
-        if norm in m_id or norm in c_slug or norm in name:
-            candidates.append(m)
+    candidates = [m for m in models if norm in mid(m) or norm in slug(m) or norm in (m.get("name") or "").lower()]
+    if candidates:
+        candidates.sort(key=lambda m: (not mid(m).endswith(norm), len(mid(m))))
+        return _describe(candidates[0])
 
-    if len(candidates) == 1:
-        m = candidates[0]
-        return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
+    by_id = {mid(m): m for m in models}
+    close = difflib.get_close_matches(norm, by_id.keys(), n=1, cutoff=0.5)
+    if close:
+        return _describe(by_id[close[0]])
 
-    if len(candidates) > 1:
-        # Prefer exact short suffix match or shortest ID
-        candidates.sort(key=lambda x: (
-            not x.get("id", "").lower().endswith(norm),
-            len(x.get("id", ""))
-        ))
-        m = candidates[0]
-        return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
-
-    # 4. Fuzzy match using difflib
-    all_slugs = {m.get("id", ""): m for m in models}
-    close_matches = difflib.get_close_matches(norm, all_slugs.keys(), n=3, cutoff=0.5)
-    if close_matches:
-        m = all_slugs[close_matches[0]]
-        return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
-
-    # Also try matching against short slugs
-    short_map = {(m.get("id", "").split("/")[-1]): m for m in models if "/" in m.get("id", "")}
-    close_short = difflib.get_close_matches(norm, short_map.keys(), n=3, cutoff=0.5)
-    if close_short:
-        m = short_map[close_short[0]]
-        return m["id"], m.get("canonical_slug") or m["id"], m.get("name", m["id"])
+    by_short = {short(m): m for m in models if "/" in mid(m)}
+    close = difflib.get_close_matches(norm, by_short.keys(), n=1, cutoff=0.5)
+    if close:
+        return _describe(by_short[close[0]])
 
     raise ModelResolutionError(
-        f"Could not resolve model '{query}'. Try searching for available models with 'openrouter-analytics search {query}'."
+        f"Could not resolve model '{query}'. Try 'openrouter-analytics search {query}' to list candidates."
     )
 
 
 def search_models(query: str, limit: int = 10) -> List[Dict[str, str]]:
-    """Search for models matching query string."""
+    """Substring search over id, name, and permaslug."""
     norm = _normalize_query(query)
-    models = get_all_models()
     results = []
-
-    for m in models:
+    for m in get_all_models():
         m_id = m.get("id", "")
         name = m.get("name", "")
-        c_slug = m.get("canonical_slug", m_id)
+        c_slug = m.get("canonical_slug") or m_id
         if norm in m_id.lower() or norm in name.lower() or norm in c_slug.lower():
             results.append({
                 "id": m_id,
@@ -159,5 +127,4 @@ def search_models(query: str, limit: int = 10) -> List[Dict[str, str]]:
             })
             if len(results) >= limit:
                 break
-
     return results

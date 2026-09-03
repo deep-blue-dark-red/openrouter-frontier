@@ -1,12 +1,13 @@
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+"""Data models for per-provider and per-model 24h statistics."""
 
-if TYPE_CHECKING:
-    from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
 
 
 def format_tokens(n: int) -> str:
-    """Format token count in human-readable compact notation (B, M, K)."""
+    """Compact token count: 1.2B, 3.4M, 5.6K."""
     if n >= 1_000_000_000:
         return f"{n / 1_000_000_000:.1f}B"
     if n >= 1_000_000:
@@ -16,26 +17,40 @@ def format_tokens(n: int) -> str:
     return str(n)
 
 
+def _fmt_latency(ms: Optional[float]) -> str:
+    if ms is None:
+        return "--"
+    return f"{ms / 1000.0:.2f}s" if ms >= 1000 else f"{ms:.0f}ms"
+
+
+def _fmt_tps(tps: Optional[float]) -> str:
+    return f"{tps:.0f} tps" if tps is not None else "--"
+
+
+def _fmt_pct(pct: Optional[float]) -> str:
+    return f"{pct:.1f}%" if pct is not None else "--"
+
+
 @dataclass
 class ProviderStats:
+    """One endpoint serving a model, with observed 24h metrics."""
+
     endpoint_id: str
     name: str
     slug: str
-    effective_input_price: float   # in $ per million tokens (from effective-pricing)
-    effective_output_price: float  # in $ per million tokens
-    cache_hit_rate: float          # 0.0 to 1.0
+    effective_input_price: float   # $/M, traffic-weighted, from effective-pricing
+    effective_output_price: float  # $/M
+    cache_hit_rate: float          # 0..1
     total_tokens: int
-    token_share: float = 0.0       # 0.0 to 1.0 relative to model total
+    token_share: float = 0.0       # 0..1 share of the model's total tokens
 
-    # Latency, Throughput (TPS), and Uptime
     latency_p50_ms: Optional[float] = None
     latency_p90_ms: Optional[float] = None
     throughput_p50_tps: Optional[float] = None
     throughput_p90_tps: Optional[float] = None
     uptime_1d_pct: Optional[float] = None
 
-    # Endpoint pricing breakdown (from endpoints API)
-    pricing: Optional[Any] = None  # EndpointPricing
+    pricing: Optional[EndpointPricing] = None
     quantization: str = "unknown"
 
     @property
@@ -44,7 +59,7 @@ class ProviderStats:
 
     @property
     def formatted_cache_hit_rate(self) -> str:
-        return f"{self.cache_hit_rate * 100.0:.1f}%"
+        return f"{self.cache_hit_rate_pct:.1f}%"
 
     @property
     def formatted_input_price(self) -> str:
@@ -64,35 +79,26 @@ class ProviderStats:
 
     @property
     def formatted_latency(self) -> str:
-        if self.latency_p50_ms is not None:
-            if self.latency_p50_ms >= 1000:
-                return f"{self.latency_p50_ms / 1000.0:.2f}s"
-            return f"{self.latency_p50_ms:.0f}ms"
-        return "--"
+        return _fmt_latency(self.latency_p50_ms)
 
     @property
     def formatted_tps(self) -> str:
-        if self.throughput_p50_tps is not None:
-            return f"{self.throughput_p50_tps:.0f} tps"
-        return "--"
+        return _fmt_tps(self.throughput_p50_tps)
 
     @property
     def formatted_uptime(self) -> str:
-        if self.uptime_1d_pct is not None:
-            return f"{self.uptime_1d_pct:.1f}%"
-        return "--"
+        return _fmt_pct(self.uptime_1d_pct)
 
-    def evaluate_score(self, config: Optional[Any] = None) -> Optional[Any]:
-        """Evaluate token cost and utility score for this provider."""
-        from .scoring import evaluate_endpoint, EndpointPricing, ScoringConfig
+    def evaluate_score(self, config: Optional[ScoringConfig] = None) -> Optional[ScoreBreakdown]:
+        """Score this endpoint with the ProviderUtility model. ``None`` if pricing is unknown."""
         if not self.pricing:
             return None
-        ttft_sec = (self.latency_p50_ms / 1000.0) if self.latency_p50_ms else None
+        ttft = self.latency_p50_ms / 1000.0 if self.latency_p50_ms is not None else None
         return evaluate_endpoint(
             pricing=self.pricing,
             cache_hit_rate=self.cache_hit_rate,
             total_tokens=self.total_tokens,
-            ttft_seconds=ttft_sec,
+            ttft_seconds=ttft,
             throughput_tps=self.throughput_p50_tps,
             uptime_pct=self.uptime_1d_pct,
             config=config or ScoringConfig(),
@@ -103,10 +109,11 @@ class ProviderStats:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        d = {
+        d: Dict[str, Any] = {
             "endpoint_id": self.endpoint_id,
             "name": self.name,
             "slug": self.slug,
+            "quantization": self.quantization,
             "cache_hit_rate": self.cache_hit_rate,
             "cache_hit_rate_pct": round(self.cache_hit_rate_pct, 2),
             "effective_input_price_per_m": self.effective_input_price,
@@ -132,8 +139,26 @@ class ProviderStats:
         return d
 
 
+# Sort specs: canonical name -> (aliases, key, descending_by_default).
+# Keys return tuples so that missing values always sort last regardless of direction.
+_SORT_SPECS: Dict[str, Any] = {
+    "cache": (("cache", "cache_hit_rate", "hit_rate"), lambda p: p.cache_hit_rate, True),
+    "latency": (("latency", "lat"), lambda p: p.latency_p50_ms, False),
+    "tps": (("tps", "throughput"), lambda p: p.throughput_p50_tps, True),
+    "uptime": (("uptime", "up"), lambda p: p.uptime_1d_pct, True),
+    "input": (("input", "input_price"), lambda p: p.effective_input_price, False),
+    "output": (("output", "output_price"), lambda p: p.effective_output_price, False),
+    "tokens": (("tokens", "volume", "total_tokens"), lambda p: p.total_tokens, True),
+    "share": (("share", "token_share"), lambda p: p.token_share, True),
+    "name": (("name", "provider"), lambda p: p.name.lower(), False),
+}
+_SORT_ALIASES = {alias: canon for canon, (aliases, _, _) in _SORT_SPECS.items() for alias in aliases}
+
+
 @dataclass
 class ModelStats:
+    """All providers serving one model plus model-level aggregates."""
+
     model_id: str
     permaslug: str
     model_name: Optional[str]
@@ -171,102 +196,73 @@ class ModelStats:
 
     @property
     def formatted_avg_latency(self) -> str:
-        if self.avg_latency_p50_ms is not None:
-            if self.avg_latency_p50_ms >= 1000:
-                return f"{self.avg_latency_p50_ms / 1000.0:.2f}s"
-            return f"{self.avg_latency_p50_ms:.0f}ms"
-        return "--"
+        return _fmt_latency(self.avg_latency_p50_ms)
 
     @property
     def formatted_avg_tps(self) -> str:
-        if self.avg_throughput_p50_tps is not None:
-            return f"{self.avg_throughput_p50_tps:.0f} tps"
-        return "--"
+        return _fmt_tps(self.avg_throughput_p50_tps)
 
     @property
     def formatted_avg_uptime(self) -> str:
-        if self.avg_uptime_1d_pct is not None:
-            return f"{self.avg_uptime_1d_pct:.1f}%"
-        return "--"
+        return _fmt_pct(self.avg_uptime_1d_pct)
 
     def get_provider(self, query: str) -> Optional[ProviderStats]:
-        """Find a provider by name, slug, or substring match."""
+        """Find a provider by exact slug/name, then by substring."""
         q = query.strip().lower()
         for p in self.providers:
-            if p.slug.lower() == q or p.name.lower() == q:
+            if q in (p.slug.lower(), p.name.lower()):
                 return p
         for p in self.providers:
             if q in p.slug.lower() or q in p.name.lower():
                 return p
         return None
 
-    def score_providers(self, config: Optional[Any] = None) -> List[Any]:
-        """
-        Evaluate and rank all providers using the scoring model.
-        Returns list of ScoreBreakdown sorted by total_cost_usd ascending (best first).
-        """
-        scores = []
-        for p in self.providers:
-            sb = p.evaluate_score(config)
-            if sb is not None:
-                scores.append(sb)
-
+    def score_providers(self, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
+        """Score every provider and return them ranked by total cost, cheapest first."""
+        scores = [sb for sb in (p.evaluate_score(config) for p in self.providers) if sb is not None]
         scores.sort(key=lambda s: s.total_cost_usd)
         for idx, s in enumerate(scores, 1):
             s.rank = idx
         return scores
 
-    def sort_by(self, field: str = "cache", descending: bool = True, config: Optional[Any] = None) -> List[ProviderStats]:
-        """
-        Sort providers by:
-        - 'cache': cache hit rate (descending)
-        - 'score' or 'cost': evaluated total cost per turn (ascending / lowest first)
-        - 'token_cost': evaluated pure token cost per turn (ascending / lowest first)
-        - 'latency': p50 latency (ascending / fastest first)
-        - 'tps': p50 throughput (descending / highest first)
-        - 'uptime': 1d uptime % (descending)
-        - 'input_price': effective input price
-        - 'output_price': effective output price
-        - 'tokens': total tokens served
-        - 'share': token share
-        - 'name': provider name
+    def sort_by(
+        self,
+        field: str = "cache",
+        descending: Optional[bool] = None,
+        config: Optional[ScoringConfig] = None,
+    ) -> List[ProviderStats]:
+        """Return providers sorted by one field.
+
+        Fields: ``cache``, ``score``/``cost``, ``token_cost``, ``latency``, ``tps``, ``uptime``,
+        ``input``, ``output``, ``tokens``, ``share``, ``name``. Each field has a natural
+        direction (best first); pass ``descending`` to override it. Providers with a missing
+        value for the field always sort last.
         """
         f = field.lower()
-        if f in ("score", "cost", "total_cost"):
-            # Sort by total_cost ascending
-            def _score_key(p):
-                sb = p.evaluate_score(config)
-                return (sb.total_cost_usd if sb else 999999.0)
-            return sorted(self.providers, key=_score_key, reverse=not descending)
-        elif f in ("token_cost", "tokencost"):
-            def _tok_key(p):
-                sb = p.evaluate_score(config)
-                return (sb.token_cost_usd if sb else 999999.0)
-            return sorted(self.providers, key=_tok_key, reverse=not descending)
-        elif f in ("cache", "cache_hit_rate", "hit_rate"):
-            key = lambda p: p.cache_hit_rate
-        elif f in ("latency", "lat"):
-            key = lambda p: (p.latency_p50_ms is None, p.latency_p50_ms or 999999)
-            return sorted(self.providers, key=key, reverse=not descending)
-        elif f in ("tps", "throughput"):
-            key = lambda p: p.throughput_p50_tps or 0.0
-        elif f in ("uptime", "up"):
-            key = lambda p: p.uptime_1d_pct or 0.0
-        elif f in ("input_price", "input"):
-            key = lambda p: p.effective_input_price
-        elif f in ("output_price", "output"):
-            key = lambda p: p.effective_output_price
-        elif f in ("tokens", "volume", "total_tokens"):
-            key = lambda p: p.total_tokens
-        elif f in ("share", "token_share"):
-            key = lambda p: p.token_share
-        elif f in ("name", "provider"):
-            key = lambda p: p.name.lower()
-            return sorted(self.providers, key=key, reverse=not descending)
-        else:
-            key = lambda p: p.cache_hit_rate
 
-        return sorted(self.providers, key=key, reverse=descending)
+        if f in ("score", "cost", "total_cost", "token_cost", "tokencost"):
+            attr = "token_cost_usd" if f.startswith("token") else "total_cost_usd"
+            cache: Dict[str, Optional[float]] = {}
+            for p in self.providers:
+                sb = p.evaluate_score(config)
+                cache[p.endpoint_id] = getattr(sb, attr) if sb else None
+            key: Callable[[ProviderStats], Any] = lambda p: cache[p.endpoint_id]
+            desc_default = False
+        else:
+            canon = _SORT_ALIASES.get(f, "cache")
+            _, key, desc_default = _SORT_SPECS[canon]
+
+        desc = desc_default if descending is None else descending
+
+        def sort_key(p: ProviderStats):
+            v = key(p)
+            if v is None:
+                return (1, 0)
+            if isinstance(v, str):
+                return (0, v)
+            return (0, -v if desc else v)
+
+        return sorted(self.providers, key=sort_key)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
