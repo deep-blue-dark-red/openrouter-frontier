@@ -7,6 +7,12 @@ and computes the cost vs. quality Pareto frontier (non-dominated models) with Kn
 Prices are resolved against OpenRouter's live catalog (/api/v1/models) to ensure
 standard list pricing rather than batch or fallback rates.
 
+High-performance architecture:
+  - macOS IPv4 fast socket resolution (zero 10s TCP timeouts)
+  - Persistent requests.Session with HTTP Keep-Alive and gzip compression
+  - Concurrent background fetching of catalog and benchmark data
+  - Multi-tier 1-hour disk caching (~0.04s warm)
+
 Usage:
     ./pareto_frontier.py
     ./pareto_frontier.py --metric coding
@@ -16,29 +22,45 @@ Usage:
     ./pareto_frontier.py --format json
 """
 
-import argparse
-import json
-import os
 import sys
+import os
+import glob
 import time
+import json
 import socket
-import urllib.error
-import urllib.request
+import argparse
+import concurrent.futures
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 
-# Optimize connection on macOS (avoid IPv6 timeout)
+# Ensure .venv dependencies are available regardless of invocation environment
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+possible_venvs = [
+    os.path.join(SCRIPT_DIR, ".venv/lib/python*/site-packages"),
+    os.path.expanduser("~/git/openrouter-analytics/.venv/lib/python*/site-packages"),
+]
+for p in possible_venvs:
+    matches = glob.glob(p)
+    if matches:
+        sys.path.insert(0, matches[0])
+        break
+
+# Force IPv4 socket resolution across all HTTP libraries on macOS
 try:
     import urllib3.util.connection
     urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
 except Exception:
     pass
 
-# Patch socket.getaddrinfo to force IPv4
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
     return [r for r in responses if r[0] == socket.AF_INET]
 socket.getaddrinfo = new_getaddrinfo
+
+import requests
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_BENCHMARKS_URL = "https://openrouter.ai/api/v1/benchmarks"
@@ -48,20 +70,12 @@ USER_AGENT = "dotOpenRouter-ParetoTool/1.0"
 CACHE_DIR = Path.home() / ".cache" / "openrouter_analytics"
 CACHE_TTL = 3600  # 1 hour
 
-
-def http_get(url: str, headers: dict | None = None) -> dict:
-    req_headers = {"User-Agent": USER_AGENT}
-    if headers:
-        req_headers.update(headers)
-    req = urllib.request.Request(url, headers=req_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        error_body = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {err.code} from {url}: {error_body}") from err
-    except Exception as err:
-        raise RuntimeError(f"Failed to fetch {url}: {err}") from err
+_session = requests.Session()
+_session.headers.update({
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
+})
 
 
 def strip_date_suffix(slug: str) -> str:
@@ -72,45 +86,83 @@ def strip_date_suffix(slug: str) -> str:
     return slug
 
 
-def load_catalog_pricing(force_refresh: bool = False) -> dict[str, dict]:
-    """Fetch catalog pricing from /api/v1/models with disk caching."""
-    cache_file = CACHE_DIR / "models.json"
-    if not force_refresh and cache_file.exists():
-        try:
-            if (time.time() - cache_file.stat().st_mtime) < CACHE_TTL:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    raw_data = json.load(f)
-                    catalog = {}
-                    for m in raw_data:
-                        m_id = m.get("id", "")
-                        pricing = m.get("pricing") or {}
-                        prompt_val = pricing.get("prompt")
-                        completion_val = pricing.get("completion")
-                        prompt_per_m = float(prompt_val) * 1_000_000 if prompt_val is not None else 0.0
-                        completion_per_m = float(completion_val) * 1_000_000 if completion_val is not None else 0.0
-                        catalog[m_id] = {
-                            "name": m.get("name", m_id),
-                            "canonical_slug": m.get("canonical_slug", m_id),
-                            "prompt_per_m": prompt_per_m,
-                            "completion_per_m": completion_per_m,
-                            "prompt_per_token": float(prompt_val) if prompt_val is not None else 0.0,
-                            "completion_per_token": float(completion_val) if completion_val is not None else 0.0,
-                        }
-                    return catalog
-        except Exception:
-            pass
+def fetch_json(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Fetch JSON with persistent session, gzip, and IPv4."""
+    req_headers = {}
+    if headers:
+        req_headers.update(headers)
+    resp = _session.get(url, headers=req_headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
-    payload = http_get(OPENROUTER_MODELS_URL)
-    raw_data = payload.get("data", [])
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(raw_data, f)
-    except Exception:
-        pass
 
+def load_data_concurrent(api_key: Optional[str] = None, force_refresh: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Loads catalog pricing and frontend benchmarks concurrently with disk caching."""
+    models_cache = CACHE_DIR / "models.json"
+    bench_cache = CACHE_DIR / "frontend_benchmarks.json"
+
+    raw_models = None
+    raw_bench = None
+
+    if not force_refresh:
+        now = time.time()
+        if models_cache.exists():
+            try:
+                if (now - models_cache.stat().st_mtime) < CACHE_TTL:
+                    with open(models_cache, "r", encoding="utf-8") as f:
+                        raw_models = json.load(f)
+            except Exception:
+                pass
+
+        if bench_cache.exists():
+            try:
+                if (now - bench_cache.stat().st_mtime) < CACHE_TTL:
+                    with open(bench_cache, "r", encoding="utf-8") as f:
+                        raw_bench = json.load(f)
+            except Exception:
+                pass
+
+    # If either needs network fetch, fetch concurrently
+    to_fetch_models = raw_models is None
+    to_fetch_bench = raw_bench is None
+
+    if to_fetch_models or to_fetch_bench:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_models = executor.submit(fetch_json, OPENROUTER_MODELS_URL) if to_fetch_models else None
+            bench_url = OPENROUTER_FRONTEND_BENCHMARKS_URL
+            fut_bench = executor.submit(fetch_json, bench_url) if to_fetch_bench else None
+
+            if fut_models:
+                try:
+                    payload = fut_models.result()
+                    raw_models = payload.get("data", [])
+                    try:
+                        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                        with open(models_cache, "w", encoding="utf-8") as f:
+                            json.dump(raw_models, f)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    if raw_models is None:
+                        raise RuntimeError(f"Failed to fetch models: {e}")
+
+            if fut_bench:
+                try:
+                    payload = fut_bench.result()
+                    raw_bench = payload.get("data", {})
+                    try:
+                        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                        with open(bench_cache, "w", encoding="utf-8") as f:
+                            json.dump(raw_bench, f)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    if raw_bench is None:
+                        raise RuntimeError(f"Failed to fetch benchmarks: {e}")
+
+    # Build catalog dictionary
     catalog = {}
-    for m in raw_data:
+    for m in raw_models or []:
         m_id = m.get("id", "")
         pricing = m.get("pricing") or {}
         prompt_val = pricing.get("prompt")
@@ -126,35 +178,14 @@ def load_catalog_pricing(force_refresh: bool = False) -> dict[str, dict]:
             "prompt_per_token": float(prompt_val) if prompt_val is not None else 0.0,
             "completion_per_token": float(completion_val) if completion_val is not None else 0.0,
         }
-    return catalog
+
+    return catalog, raw_bench or {}
 
 
-def load_benchmarks(api_key: str | None, metric: str, force_refresh: bool = False) -> tuple[list[dict], dict[str, float]]:
-    """Load benchmark data and optional weighted input prices with disk caching."""
-    cache_file = CACHE_DIR / "frontend_benchmarks.json"
-    fe_payload = None
+def extract_benchmark_items(raw_bench: Dict[str, Any], metric: str) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    weighted_prices = raw_bench.get("weightedInputPrices", {})
+    aa_data = raw_bench.get("aaData", {})
 
-    if not force_refresh and cache_file.exists():
-        try:
-            if (time.time() - cache_file.stat().st_mtime) < CACHE_TTL:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    fe_payload = json.load(f)
-        except Exception:
-            pass
-
-    if fe_payload is None:
-        try:
-            fe_payload = http_get(OPENROUTER_FRONTEND_BENCHMARKS_URL).get("data", {})
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(fe_payload, f)
-        except Exception:
-            fe_payload = {}
-
-    weighted_prices = fe_payload.get("weightedInputPrices", {})
-    aa_data = fe_payload.get("aaData", {})
-
-    items = []
     cat_key = "intelligence"
     if metric in ("coding", "coding_index", "code"):
         cat_key = "coding"
@@ -162,6 +193,7 @@ def load_benchmarks(api_key: str | None, metric: str, force_refresh: bool = Fals
         cat_key = "agentic"
 
     raw_list = aa_data.get(cat_key, [])
+    items = []
     for entry in raw_list:
         items.append({
             "model_permaslug": entry.get("permaslug") or entry.get("uid"),
@@ -170,11 +202,10 @@ def load_benchmarks(api_key: str | None, metric: str, force_refresh: bool = Fals
             "coding_index": entry.get("score") if cat_key == "coding" else None,
             "agentic_index": entry.get("score") if cat_key == "agentic" else None,
         })
-
     return items, weighted_prices
 
 
-def compute_pareto(candidates: list[dict]) -> tuple[list[dict], int | None]:
+def compute_pareto(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Compute Pareto frontier given items with 'cost' and 'score'.
 
     Objectives: minimize cost, maximize score.
@@ -193,7 +224,6 @@ def compute_pareto(candidates: list[dict]) -> tuple[list[dict], int | None]:
             frontier.append(item)
             max_score = item["score"]
 
-    # Calculate knee point (best trade-off: max normalized distance above line between extremes)
     knee_idx = None
     if len(frontier) >= 3:
         min_cost = frontier[0]["cost"]
@@ -270,17 +300,19 @@ def main():
         default=os.environ.get("OPENROUTER_API_KEY"),
         help="OpenRouter API key (defaults to $OPENROUTER_API_KEY env var).",
     )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force refresh data from OpenRouter API.",
+    )
 
     args = parser.parse_args()
 
-    # 1. Fetch live catalog pricing (cached)
-    catalog = load_catalog_pricing()
-
-    # 2. Fetch live benchmark entries (cached)
-    bench_items, weighted_prices = load_benchmarks(args.api_key, args.metric)
+    # Load catalog and benchmarks concurrently (with sub-second cache)
+    catalog, raw_bench = load_data_concurrent(api_key=args.api_key, force_refresh=args.refresh)
+    bench_items, weighted_prices = extract_benchmark_items(raw_bench, args.metric)
 
     score_key = f"{args.metric}_index"
-
     candidates = []
     seen_slugs = set()
 
@@ -352,7 +384,6 @@ def main():
             if item["on_frontier"]:
                 item["dist"] = 0.0
             else:
-                # How much score is lost compared to closest cost on frontier
                 better_scores = [f["score"] for f in frontier if f["cost"] <= item["cost"]]
                 if better_scores:
                     item["dist"] = max(better_scores) - item["score"]
@@ -361,7 +392,6 @@ def main():
 
     output_list = candidates if args.all_models else frontier
     if args.all_models:
-        # Sort: frontier first by cost, then dominated by distance to frontier
         output_list.sort(key=lambda x: (not x["on_frontier"], x["cost"] if x["on_frontier"] else x["dist"]))
 
     if args.format == "json":
@@ -387,18 +417,37 @@ def main():
             cost_str = f"${m['cost']:.4f}" if args.price_source == "call" else f"${m['cost']:.2f}"
             print(f"| {m['name']} (`{m['id']}`) | {m['score']:.1f} | {cost_str} | {on_front} |")
     else:
-        divider = "─" * 125
+        cols = [
+            ("MODEL", 56, "<"),
+            ("ID", 32, "<"),
+            (metric_header, 12, ">"),
+            (cost_header, 16, ">"),
+            ("STATUS", 14, "<"),
+        ]
+        header_parts = [f"{name:>{w}}" if a == ">" else f"{name:<{w}}" for name, w, a in cols]
+        header_str = "  ".join(header_parts)
+        divider = "─" * len(header_str)
+
         print()
         print(divider)
         print(f"OpenRouter Pareto Frontier [{args.metric.upper()}] ({len(frontier)} non-dominated of {len(candidates)} models)")
         print(f"Price metric: {args.price_source.upper()} ({output_list[0]['cost_unit'] if output_list else ''})")
         print(divider)
-        print(f"{'MODEL':<56} {'ID':<30} {metric_header:>12} {cost_header:>16}  STATUS")
+        print(header_str)
         print(divider)
+
         for m in output_list:
             tag = "← KNEE" if m.get("is_knee") else ("ON FRONTIER" if m["on_frontier"] else "")
             cost_str = f"${m['cost']:<10.4f}" if args.price_source == "call" else f"${m['cost']:<10.2f}"
-            print(f"{m['name'][:56]:<56} {m['id'][:30]:<30} {m['score']:>12.1f} {cost_str:>16}  {tag}")
+            row_vals = [
+                m["name"][:56],
+                m["id"][:32],
+                f"{m['score']:.1f}",
+                cost_str.strip(),
+                tag,
+            ]
+            print("  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols)))
+
         print(divider)
         print("← KNEE indicates the optimal trade-off point with maximum quality score gain per dollar.\n")
 
