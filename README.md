@@ -6,11 +6,16 @@ The suite pulls OpenRouter's observed 24-hour metrics for every endpoint serving
 (prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
 **pricing**) and turns them into two kinds of ranking:
 
-- **ProviderUtility scoring** – expected dollar cost of a conversation turn, including cache
-  economics with Bayesian shrinkage, an optional value-of-time term, and failure risk. Reported
-  per 1M tokens so it sits on the same scale as list prices.
+- **ProviderUtility scoring** – a formal expected dollar cost of a conversation turn, explicit formula using
+  - provider cache-hit rate
+  - token-generation rate (via your price of hour of time)
+  - provider switch risk (incurring a cache-miss) from uptime.
+  - Bayesian shrinkage for small providers without much history.
+  See (Scoring model)[#Scoring model]Reported per 1M tokens so it sits on the same scale as list prices. 
+
 - **Pareto frontier analysis** – which providers (or models) are not dominated across several
   objectives at once, so you can see the real trade-offs instead of picking one weight.
+For models, the Pareto frontier quality axis pulls over API Artificial Analysis scores; for the cost axis, token-weighted provider inference cost observed on OpenRouter over last 24 hours. 
 
 Everything is cached on disk under `~/.cache/openrouter_analytics/` (5 minutes for live
 stats, 1 hour for the catalog and benchmarks), so repeat runs are near-instant.
