@@ -153,6 +153,52 @@ x-ai/grok-4.20                        $0.003750     $1.2500     $2.5000    $0.20
 
 ---
 
+### 4. `get_models.py` — Model Catalog Query & Inspector
+
+Fast search and inspection for all 400+ models on OpenRouter with prompt caching, context length, and pricing breakdown.
+
+```bash
+# Inspect full specifications and pricing for a single model
+./get_models.py z-ai/glm-5.3-flash
+
+# Search by keyword
+./get_models.py -q flash --top 10
+
+# Filter by creator and sort by context window
+./get_models.py --creator anthropic --sort context
+
+# Filter only models supporting prompt caching
+./get_models.py --caching --sort price --top 10
+
+# Force refresh from OpenRouter API
+./get_models.py --refresh
+```
+
+#### Example Output:
+
+```text
+────────────────────────────────────────────────────────────────────────────────
+Model: Z.ai: GLM 5.3 Flash
+ID:    z-ai/glm-5.3-flash
+Slug:  z-ai/glm-5.3-flash-20260826
+────────────────────────────────────────────────────────────────────────────────
+  Context Window:        1,310,720 tokens
+  Max Output Tokens:     131,072
+  Modality:              text+image+video->text
+
+  Pricing (USD per million tokens):
+    Prompt (Input):      $0.0750 / M
+    Completion (Output): $0.2500 / M
+    Cache Read:          $0.0150 / M
+    Cache Write:         -- / M
+
+  Description:
+    GLM-5.3-Flash is a native multimodal model from Z.ai. It is suited for efficient coding an
+────────────────────────────────────────────────────────────────────────────────
+```
+
+---
+
 ## ProviderUtility Scoring Mathematical Model
 
 ### 1. Token Cost Term
