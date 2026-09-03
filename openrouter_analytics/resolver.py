@@ -59,9 +59,11 @@ def get_all_models(force_refresh: bool = False) -> List[Dict[str, Any]]:
 def _normalize_query(q: str) -> str:
     """Normalize input strings, correcting common domain/separator substitutions."""
     q = q.strip().lower()
-    # Replace domain dot with hyphen (e.g. z.ai -> z-ai)
-    q = q.replace("z.ai", "z-ai")
-    q = q.replace("meta.llama", "meta-llama")
+    import re
+    # Normalize creator prefixes (z.ai -> z-ai, zai/ -> z-ai/)
+    q = re.sub(r"^z[\.\-_]ai(/|$)", r"z-ai", q)
+    q = re.sub(r"^zai(/|$)", r"z-ai", q)
+    q = re.sub(r"^meta[\.\-_]llama(/|$)", r"meta-llama", q)
     # Common typo: flsh -> flash
     if "flsh" in q:
         q = q.replace("flsh", "flash")

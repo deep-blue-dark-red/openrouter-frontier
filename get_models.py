@@ -2,16 +2,19 @@
 """
 get_models.py - Fast model catalog search and inspector for OpenRouter.
 
-Query, inspect, and filter 400+ models from OpenRouter:
-  - Search by name, slug, or maker
+Query, inspect, and filter 400+ models from OpenRouter with punctuation-agnostic
+fuzzy matching:
+  - Supports 'zai' vs 'z.ai' vs 'z-ai'
+  - Subsequence matching: 'glm53', 'claude37', 'gpt45'
+  - Typo tolerance: 'flsh' -> 'flash'
   - Filter by prompt caching support, creator, or modality
-  - Sort by prompt price, completion price, or context length
-  - Inspect full pricing and architecture specs for any individual model
+  - Sort by prompt price, completion price, context length, or relevance
 
 Usage:
-  ./get_models.py [QUERY]                  # Search models or inspect single model
+  ./get_models.py [QUERY]                  # Search models (fuzzy) or inspect single model
+  ./get_models.py zai                      # Matches all Z.ai models (same as 'z.ai' or 'z-ai')
   ./get_models.py -q flash                 # Keyword search
-  ./get_models.py --creator anthropic      # Filter by maker
+  ./get_models.py --creator zai            # Filter by maker
   ./get_models.py --caching                # Only models supporting prompt caching
   ./get_models.py --sort price             # Sort by prompt price
   ./get_models.py --sort context           # Sort by context window
@@ -21,11 +24,13 @@ Usage:
 
 import sys
 import os
+import re
 import glob
 import json
 import socket
+import difflib
 import argparse
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 # Optimize socket resolution on macOS (avoid IPv6 timeout)
 try:
@@ -42,6 +47,59 @@ if venv_site_packages:
     sys.path.insert(0, venv_site_packages[0])
 
 from openrouter_analytics.resolver import get_all_models, resolve_model
+
+
+def clean_str(s: str) -> str:
+    """Removes all non-alphanumeric characters and lowercases the string."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def calculate_match_score(query: str, model_id: str, model_name: str) -> float:
+    """
+    Calculates fuzzy relevance score (0.0 to 1.0) between query and a model.
+    Punctuation/delimiter-agnostic: 'zai' matches 'z.ai' and 'z-ai'.
+    """
+    if not query:
+        return 1.0
+
+    q_clean = clean_str(query)
+    if not q_clean:
+        return 0.0
+
+    m_id_clean = clean_str(model_id)
+    m_name_clean = clean_str(model_name)
+
+    short_id = model_id.split("/")[-1] if "/" in model_id else model_id
+    short_clean = clean_str(short_id)
+
+    creator = model_id.split("/")[0] if "/" in model_id else ""
+    creator_clean = clean_str(creator)
+
+    # 1. Exact clean match on ID or short slug
+    if q_clean == m_id_clean or q_clean == short_clean:
+        return 1.0
+
+    # 2. Exact match on creator (e.g. 'zai' or 'z.ai' matching 'z-ai')
+    if q_clean == creator_clean:
+        return 0.95
+
+    # 3. Clean alphanumeric prefix match
+    if short_clean.startswith(q_clean) or m_id_clean.startswith(q_clean) or creator_clean.startswith(q_clean):
+        return 0.90
+
+    # 4. Clean alphanumeric substring match (e.g. 'zai' in 'zaiglm53flash' or 'glm53')
+    if q_clean in m_id_clean or q_clean in m_name_clean or q_clean in short_clean or q_clean in creator_clean:
+        return 0.85
+
+    # 5. Fuzzy ratio on clean query vs short slug, ID, or creator
+    r1 = difflib.SequenceMatcher(None, q_clean, short_clean).ratio()
+    r2 = difflib.SequenceMatcher(None, q_clean, m_id_clean).ratio()
+    r3 = difflib.SequenceMatcher(None, q_clean, creator_clean).ratio()
+    max_r = max(r1, r2, r3)
+    if max_r >= 0.70:
+        return max_r * 0.8
+
+    return 0.0
 
 
 def format_price(val: Any) -> str:
@@ -149,15 +207,20 @@ def print_models_table(models: List[Dict[str, Any]], title_suffix: str = ""):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Query and inspect models from OpenRouter catalog.",
+        description="Query and inspect models from OpenRouter catalog with fuzzy matching.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("query", nargs="?", default=None, help="Model ID, search keyword, or creator slug")
+    parser.add_argument("query", nargs="?", default=None, help="Model ID, search keyword, or creator slug (e.g. zai, z.ai, glm-5.3)")
     parser.add_argument("-q", "--search", type=str, default="", help="Keyword search across model ID and name")
-    parser.add_argument("-m", "--creator", type=str, default="", help="Filter by creator (e.g. anthropic, openai, meta, z-ai)")
+    parser.add_argument("-m", "--creator", type=str, default="", help="Filter by creator (e.g. zai, z.ai, anthropic, openai)")
     parser.add_argument("--caching", action="store_true", help="Show only models supporting prompt cache read")
     parser.add_argument("--modality", type=str, default="", help="Filter by modality (e.g. text->text, multimodal)")
-    parser.add_argument("--sort", choices=["name", "price", "completion", "context", "created"], default="name", help="Sort order")
+    parser.add_argument(
+        "--sort",
+        choices=["relevance", "name", "price", "completion", "context", "created"],
+        default="relevance",
+        help="Sort order",
+    )
     parser.add_argument("-n", "--top", type=int, default=30, help="Max models to display")
     parser.add_argument("--refresh", action="store_true", help="Force refresh models from OpenRouter API")
     parser.add_argument("--json", action="store_true", help="Output raw JSON format")
@@ -166,31 +229,34 @@ def main():
 
     raw_models = get_all_models(force_refresh=args.refresh)
 
-    search_term = (args.query or args.search).strip().lower()
+    search_query = (args.query or args.search).strip()
 
-    # If exact single model match requested, inspect directly
+    # Exact single model lookup if requested by exact slug/id
     if args.query and not args.search:
-        exact_matches = [m for m in raw_models if m.get("id", "").lower() == search_term or m.get("canonical_slug", "").lower() == search_term]
-        if exact_matches:
+        clean_q = clean_str(args.query)
+        exact_matches = [
+            m for m in raw_models
+            if clean_str(m.get("id", "")) == clean_q or clean_str(m.get("canonical_slug", "")) == clean_q
+        ]
+        if len(exact_matches) == 1 and ("/" in args.query or len(exact_matches[0].get("id", "").split("/")) == 1):
             if args.json:
                 print(json.dumps(exact_matches[0], indent=2))
             else:
                 print_single_model(exact_matches[0])
             return
 
-    # Filter models
-    filtered = []
+    # Filter models and calculate scores
+    scored_candidates: List[Tuple[float, Dict[str, Any]]] = []
+
+    creator_clean = clean_str(args.creator) if args.creator else ""
+
     for m in raw_models:
-        m_id = m.get("id", "").lower()
-        m_name = (m.get("name") or "").lower()
+        m_id = m.get("id", "")
+        m_name = m.get("name") or m_id
+        m_creator = m_id.split("/")[0] if "/" in m_id else ""
 
-        if search_term:
-            if search_term not in m_id and search_term not in m_name:
-                continue
-
-        if args.creator:
-            creator = args.creator.lower().rstrip("/")
-            if not m_id.startswith(creator + "/") and creator not in m_name:
+        if creator_clean:
+            if creator_clean not in clean_str(m_creator) and creator_clean not in clean_str(m_name):
                 continue
 
         p = m.get("pricing", {})
@@ -203,10 +269,15 @@ def main():
             if args.modality.lower() not in mod:
                 continue
 
-        filtered.append(m)
+        score = calculate_match_score(search_query, m_id, m_name)
+        if search_query and score <= 0.0:
+            continue
 
-    # Sort
-    def sort_key(m):
+        scored_candidates.append((score, m))
+
+    # Sort candidates
+    def sort_key(item: Tuple[float, Dict[str, Any]]):
+        score, m = item
         p = m.get("pricing", {})
         if args.sort == "price":
             raw = float(p.get("prompt") or 0.0)
@@ -218,27 +289,31 @@ def main():
             return -int(m.get("context_length") or 0)
         elif args.sort == "created":
             return -int(m.get("created") or 0)
-        return (m.get("name") or m.get("id", "")).lower()
+        elif args.sort == "name":
+            return (m.get("name") or m.get("id", "")).lower()
+        # Default: relevance score first (higher is better), then name
+        return (-score, (m.get("name") or m.get("id", "")).lower())
 
-    filtered.sort(key=sort_key)
+    scored_candidates.sort(key=sort_key)
+    filtered = [m for _, m in scored_candidates]
 
     if args.json:
         print(json.dumps(filtered[:args.top], indent=2))
         return
 
-    # If only 1 matched, print details
-    if len(filtered) == 1 and search_term:
+    # If exactly 1 result matched a specific query, print detailed card
+    if len(filtered) == 1 and search_query:
         print_single_model(filtered[0])
         return
 
     title_suffix = ""
-    if search_term:
-        title_suffix += f" matching '{search_term}'"
+    if search_query:
+        title_suffix += f" matching '{search_query}'"
     if args.creator:
         title_suffix += f" by '{args.creator}'"
     if args.caching:
         title_suffix += " with Prompt Caching"
-    if args.sort != "name":
+    if args.sort not in ("relevance", "name"):
         title_suffix += f" (sorted by {args.sort})"
 
     print_models_table(filtered[:args.top], title_suffix=title_suffix)
