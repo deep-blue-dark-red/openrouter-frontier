@@ -4,7 +4,7 @@
 Quality comes from OpenRouter's published Artificial Analysis indices (intelligence, coding,
 or agentic); cost from the live catalog list price, the traffic-weighted effective price, or an
 estimated per-call cost. Models are on the frontier when no cheaper model scores as high. The
-knee point is the frontier model with the best normalised quality gain per dollar.
+efficient point is the frontier model with the best normalised quality gain per dollar.
 
 Usage:
   ./model_frontier.py
@@ -112,7 +112,7 @@ def build_candidates(
     prompt_tokens: int = 1000,
     completion_tokens: int = 1000,
 ) -> List[Dict[str, Any]]:
-    """Join benchmark scores with prices and tag each candidate with frontier/knee/dist."""
+    """Join benchmark scores with prices and tag each candidate with frontier/efficient/dist."""
     items, weighted_prices = extract_benchmark_items(raw_bench, metric)
     candidates: List[Dict[str, Any]] = []
     seen = set()
@@ -184,8 +184,8 @@ def main() -> None:
         candidates.sort(key=lambda x: x["score"], reverse=True)
         candidates = candidates[: args.top]
 
-    frontier, knee_idx = cost_quality_frontier(candidates)
-    annotate_frontier(candidates, frontier, knee_idx)
+    frontier, efficient_idx = cost_quality_frontier(candidates)
+    annotate_frontier(candidates, frontier, efficient_idx)
     output = sorted(candidates, key=frontier_sort_key) if args.all_models else frontier
 
     if args.format == "json":
@@ -206,7 +206,7 @@ def main() -> None:
         print(f"| Model | {metric_header} | Cost ({unit}) | Frontier |")
         print("|---|---|---|---|")
         for m in output:
-            status = ("Yes (knee)" if m["is_knee"] else "Yes") if m["on_frontier"] else "No"
+            status = ("Yes (efficient point)" if m["is_efficient"] else "Yes") if m["on_frontier"] else "No"
             print(f"| {m['name']} (`{m['id']}`) | {m['score']:.1f} | ${m['cost']:.{digits}f} | {status} |")
         return
 
@@ -217,7 +217,7 @@ def main() -> None:
             m["id"][:32],
             f"{m['score']:.1f}",
             f"${m['cost']:.{digits}f}",
-            "← KNEE" if m["is_knee"] else ("ON FRONTIER" if m["on_frontier"] else f"-{m['dist']:.1f} pts"),
+            "← EFFICIENT" if m["is_efficient"] else ("ON FRONTIER" if m["on_frontier"] else f"-{m['dist']:.1f} pts"),
         ]
         for m in output
     ]
@@ -225,7 +225,7 @@ def main() -> None:
         cols, rows,
         title=f"OpenRouter Cost vs. {args.metric.capitalize()} Pareto Frontier",
         subtitle_lines=[f"{len(frontier)} non-dominated of {len(candidates)} benchmarked models  •  price source: {args.price_source}"],
-        footer="← KNEE is the frontier point with the largest normalised score gain per dollar; '-N pts' is a dominated model's gap to the frontier.",
+        footer="← EFFICIENT is the frontier point with the largest normalised score gain per dollar; '-N pts' is a dominated model's gap to the frontier.",
     )
 
 

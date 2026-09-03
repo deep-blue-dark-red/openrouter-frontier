@@ -100,21 +100,44 @@ class ScoreBreakdown:
     quantization: str = "unknown"
     rank: int = 0
 
+    # -- per-million-token views: the same costs normalised by the turn's token count, so
+    #    they read on the same scale as the catalog's $/M prices instead of as tiny per-turn sums.
+
+    def _per_m(self, usd: float) -> float:
+        tokens = self.prompt_tokens + self.completion_tokens
+        return usd / tokens * 1_000_000 if tokens else 0.0
+
+    @property
+    def token_cost_per_m(self) -> float:
+        return self._per_m(self.token_cost_usd)
+
+    @property
+    def time_cost_per_m(self) -> float:
+        return self._per_m(self.time_cost_usd)
+
+    @property
+    def failure_cost_per_m(self) -> float:
+        return self._per_m(self.failure_cost_usd)
+
+    @property
+    def total_cost_per_m(self) -> float:
+        return self._per_m(self.total_cost_usd)
+
     @property
     def formatted_token_cost(self) -> str:
-        return f"${self.token_cost_usd:.6f}"
+        return f"${self.token_cost_per_m:.4f}"
 
     @property
     def formatted_time_cost(self) -> str:
-        return f"${self.time_cost_usd:.6f}"
+        return f"${self.time_cost_per_m:.4f}"
 
     @property
     def formatted_failure_cost(self) -> str:
-        return f"${self.failure_cost_usd:.6f}"
+        return f"${self.failure_cost_per_m:.4f}"
 
     @property
     def formatted_total_cost(self) -> str:
-        return f"${self.total_cost_usd:.6f}"
+        return f"${self.total_cost_per_m:.4f}"
 
     @property
     def formatted_h_raw(self) -> str:
@@ -140,6 +163,10 @@ class ScoreBreakdown:
             "time_cost_usd": round(self.time_cost_usd, 8),
             "failure_cost_usd": round(self.failure_cost_usd, 8),
             "total_cost_usd": round(self.total_cost_usd, 8),
+            "token_cost_per_m": round(self.token_cost_per_m, 6),
+            "time_cost_per_m": round(self.time_cost_per_m, 6),
+            "failure_cost_per_m": round(self.failure_cost_per_m, 6),
+            "total_cost_per_m": round(self.total_cost_per_m, 6),
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "ttft_seconds": self.ttft_seconds,

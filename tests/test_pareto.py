@@ -25,26 +25,26 @@ def test_missing_values_never_dominate():
     assert pareto_mask(items, OBJECTIVES) == [False, True]
 
 
-def test_cost_quality_frontier_and_knee():
+def test_cost_quality_frontier_and_efficient_point():
     cands = [
         {"id": "a", "cost": 1.0, "score": 10.0},
-        {"id": "b", "cost": 2.0, "score": 30.0},   # big jump for little cost => knee
+        {"id": "b", "cost": 2.0, "score": 30.0},   # big jump for little cost => efficient point
         {"id": "c", "cost": 3.0, "score": 20.0},   # dominated by b
         {"id": "d", "cost": 10.0, "score": 31.0},
     ]
-    frontier, knee = cost_quality_frontier(cands)
+    frontier, efficient = cost_quality_frontier(cands)
     assert [f["id"] for f in frontier] == ["a", "b", "d"]
-    assert frontier[knee]["id"] == "b"
+    assert frontier[efficient]["id"] == "b"
 
-    annotate_frontier(cands, frontier, knee)
+    annotate_frontier(cands, frontier, efficient)
     by_id = {c["id"]: c for c in cands}
     assert by_id["c"]["on_frontier"] is False
     assert by_id["c"]["dist"] == 10.0  # best cheaper frontier score (30) minus own score (20)
-    assert by_id["b"]["is_knee"] is True
+    assert by_id["b"]["is_efficient"] is True
     assert by_id["a"]["dist"] == 0.0
 
 
-def test_frontier_needs_three_points_for_knee():
-    frontier, knee = cost_quality_frontier([{"id": "a", "cost": 1, "score": 1}, {"id": "b", "cost": 2, "score": 2}])
-    assert len(frontier) == 2 and knee is None
+def test_frontier_needs_three_points_for_efficient_point():
+    frontier, efficient = cost_quality_frontier([{"id": "a", "cost": 1, "score": 1}, {"id": "b", "cost": 2, "score": 2}])
+    assert len(frontier) == 2 and efficient is None
     assert cost_quality_frontier([]) == ([], None)

@@ -6,7 +6,7 @@ Two flavours are provided:
   when some other item ``b`` is at least as good on every objective and strictly better
   on at least one. Items that are not dominated form the frontier.
 * :func:`cost_quality_frontier` - the classic 2-D "minimise cost, maximise score" sweep,
-  plus knee-point detection and vertical distance-to-frontier for dominated items.
+  plus efficient point detection and vertical distance-to-frontier for dominated items.
 """
 
 from dataclasses import dataclass
@@ -73,17 +73,17 @@ def cost_quality_frontier(
     cost_key: str = "cost",
     score_key: str = "score",
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-    """Compute the 2-D frontier for "minimise cost, maximise score" and locate its knee.
+    """Compute the 2-D frontier for "minimise cost, maximise score" and locate its efficient point.
 
     Candidates are sorted by ascending cost (ties broken by descending score); an item is on
     the frontier if its score exceeds every cheaper item's score.
 
-    The knee is the frontier point that maximises ``norm_score - norm_cost``, where both
+    The efficient point is the frontier point that maximises ``norm_score - norm_cost``, where both
     axes are min-max normalised to [0, 1] over the frontier. Geometrically that is the point
     furthest above the chord joining the cheapest and the highest-scoring frontier items,
-    i.e. the best marginal quality gained per dollar. A knee requires at least 3 points.
+    i.e. the best marginal quality gained per dollar. An efficient point requires at least 3 points.
 
-    :return: ``(frontier_items, knee_index_into_frontier)``
+    :return: ``(frontier_items, efficient_index_into_frontier)``
     """
     if not candidates:
         return [], None
@@ -96,7 +96,7 @@ def cost_quality_frontier(
             frontier.append(item)
             best_score = item[score_key]
 
-    knee_idx: Optional[int] = None
+    efficient_idx: Optional[int] = None
     if len(frontier) >= 3:
         min_cost, max_cost = frontier[0][cost_key], frontier[-1][cost_key]
         min_score, max_score = frontier[0][score_key], frontier[-1][score_key]
@@ -106,29 +106,29 @@ def cost_quality_frontier(
         for i, item in enumerate(frontier):
             gain = (item[score_key] - min_score) / score_range - (item[cost_key] - min_cost) / cost_range
             if gain > best_gain:
-                best_gain, knee_idx = gain, i
+                best_gain, efficient_idx = gain, i
 
-    return frontier, knee_idx
+    return frontier, efficient_idx
 
 
 def annotate_frontier(
     candidates: List[Dict[str, Any]],
     frontier: List[Dict[str, Any]],
-    knee_idx: Optional[int],
+    efficient_idx: Optional[int],
     id_key: str = "id",
     cost_key: str = "cost",
     score_key: str = "score",
 ) -> None:
-    """Tag each candidate in place with ``on_frontier``, ``is_knee`` and ``dist``.
+    """Tag each candidate in place with ``on_frontier``, ``is_efficient`` and ``dist``.
 
     ``dist`` is the vertical gap to the frontier: the best frontier score available at or
     below the candidate's cost, minus the candidate's own score. Frontier items get 0.
     """
     frontier_ids = {f[id_key] for f in frontier}
-    knee_id = frontier[knee_idx][id_key] if knee_idx is not None else None
+    efficient_id = frontier[efficient_idx][id_key] if efficient_idx is not None else None
     for item in candidates:
         item["on_frontier"] = item[id_key] in frontier_ids
-        item["is_knee"] = item[id_key] == knee_id
+        item["is_efficient"] = item[id_key] == efficient_id
         if item["on_frontier"] or not frontier:
             item["dist"] = 0.0
             continue

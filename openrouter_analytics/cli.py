@@ -212,19 +212,19 @@ def score_command(
             f"Mode: [bold yellow]{mode}[/bold yellow] | Time Value: [bold]${time_value:.2f}/hr[/bold] | Failure Risk: [bold]{'Yes' if price_failures else 'No'}[/bold]\n"
             f"Shrinkage: prior=[bold]{prior * 100:.0f}%[/bold], weight=[bold]{prior_weight / 1e9:.1f}B[/bold] tokens | "
             f"Discounts: [bold]{'Applied' if discount else 'List Price'}[/bold] | Quants: [bold]{'All' if all_quants else 'Primary'}[/bold]",
-            title="ProviderUtility Evaluation & Cost per Turn",
+            title="ProviderUtility Evaluation & Cost per 1M tok",
             border_style="magenta",
         )
     )
 
     table = Table(show_header=True, header_style="bold magenta", border_style="dim")
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Scored Cost", style="bold green", justify="right", no_wrap=True)
-    table.add_column("Token Cost", justify="right")
+    table.add_column("Scored $/M", style="bold green", justify="right", no_wrap=True)
+    table.add_column("Token $/M", justify="right")
     if time_value > 0:
-        table.add_column("Time Cost", justify="right")
+        table.add_column("Time $/M", justify="right")
     if price_failures:
-        table.add_column("Fail Risk", justify="right")
+        table.add_column("Fail $/M", justify="right")
     table.add_column("CacheHit", justify="right")
     table.add_column("h (pub)", justify="right", style="dim")
     for col in ("Hit $/M", "Miss $/M", "Latency", "TPS", "Uptime"):
@@ -248,7 +248,7 @@ def score_command(
         table.add_row(*row)
 
     console.print(table)
-    console.print("[dim]Lower Scored Cost is better. CacheHit is the shrunk hit rate used in scoring; h (pub) is the published 24h rate.[/dim]\n")
+    console.print("[dim]Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h (pub) is the published 24h rate.[/dim]\n")
 
 
 @main.command(name="cache")
@@ -304,7 +304,7 @@ def cache_command(model: str, provider: Optional[str], prompt_tokens: int, compl
     if score:
         console.print(f"[bold cyan]Shrunk Hit Rate (h_used):[/bold cyan] {_color_hit_rate(score.h_used * 100.0)}")
         console.print(
-            f"[bold cyan]Expected Token Cost / Turn:[/bold cyan] [bold green]{score.formatted_token_cost}[/bold green] "
+            f"[bold cyan]Expected Token Cost (per 1M tok):[/bold cyan] [bold green]{score.formatted_token_cost}[/bold green] "
             f"({prompt_tokens} prompt + {completion_tokens} completion)"
         )
         console.print(f"[bold cyan]Cache Hit Price:[/bold cyan] ${score.hit_price:.4f} /M | [bold cyan]Miss Price:[/bold cyan] ${score.miss_price:.4f} /M")
@@ -343,7 +343,7 @@ def compare_command(model: str, providers: List[str], prompt_tokens: int, comple
         header_style="bold magenta",
     )
     table.add_column("Provider", style="bold white", no_wrap=True)
-    table.add_column("Scored Cost", justify="right", style="bold green")
+    table.add_column("Scored $/M", justify="right", style="bold green")
     for col in ("CacheHit", "h (pub)", "Latency", "TPS", "Uptime", "Tokens (24h)", "Share"):
         table.add_column(col, justify="right")
 

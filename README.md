@@ -1,4 +1,4 @@
-# OpenRouter Analytics
+# OpenRouter Frontier
 
 Python tools for choosing an OpenRouter model and provider on evidence rather than list price.
 
@@ -6,8 +6,9 @@ The suite pulls OpenRouter's observed 24-hour metrics for every endpoint serving
 (prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
 **pricing**) and turns them into two kinds of ranking:
 
-- **ProviderUtility scoring** – expected dollar cost per conversation turn, including cache
-  economics with Bayesian shrinkage, an optional value-of-time term, and failure risk.
+- **ProviderUtility scoring** – expected dollar cost of a conversation turn, including cache
+  economics with Bayesian shrinkage, an optional value-of-time term, and failure risk. Reported
+  per 1M tokens so it sits on the same scale as list prices.
 - **Pareto frontier analysis** – which providers (or models) are not dominated across several
   objectives at once, so you can see the real trade-offs instead of picking one weight.
 
@@ -17,7 +18,7 @@ stats, 1 hour for the catalog and benchmarks), so repeat runs are near-instant.
 ## Installation
 
 ```bash
-git clone <repo> openrouter-analytics && cd openrouter-analytics
+git clone https://github.com/deep-blue-dark-red/openrouter-frontier.git && cd openrouter-frontier
 uv venv && source .venv/bin/activate
 uv pip install -e .            # installs the `openrouter-analytics` / `or-analytics` CLI
 uv pip install -e '.[dev]'     # adds pytest
@@ -28,14 +29,15 @@ The repo-root scripts (`./score_providers.py`, `./openrouter-tui`, …) locate t
 
 ## Tools
 
-| Tool | Question it answers |
-|---|---|
-| `openrouter-tui` | Interactive: browse the model frontier, drill into a model's providers |
-| `score_providers.py` | Which provider is cheapest per turn for this model, all things considered? |
-| `provider_frontier.py` | Which providers are non-dominated on cost, latency, TPS, cache hit, uptime? |
-| `model_frontier.py` | Which models give the most benchmark quality per dollar? Where is the knee? |
-| `get_models.py` | Search and inspect the 400+ model catalog |
-| `openrouter-analytics` | Rich-coloured CLI: `stats`, `score`, `cache`, `compare`, `search` |
+| Tool                   | Question it answers                                                                    |
+| ---------------------- | -------------------------------------------------------------------------------------- |
+| `openrouter-tui`       | Interactive: browse the model frontier, drill into a model's providers                 |
+| `score_providers.py`   | Which provider is cheapest for this model, all things considered?                      |
+| `provider_frontier.py` | Which providers are non-dominated on cost, latency, TPS, cache hit, uptime?            |
+| `model_frontier.py`    | Which models give the most benchmark quality per dollar? Where is the efficient point? |
+| `model_router.py`      | I need at least this much intelligence: which model and provider should I call?        |
+| `get_models.py`        | Search and inspect the 400+ model catalog                                              |
+| `openrouter-analytics` | Rich-coloured CLI: `stats`, `score`, `cache`, `compare`, `search`                      |
 
 All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, and
 `glm-5.3-flash` all resolve to `z-ai/glm-5.3-flash`.
@@ -46,12 +48,16 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
 ./openrouter-tui
 ```
 
+![openrouter-tui models view](docs/openrouter-tui.png)
+
 - **Models view** – every benchmarked model, sorted by the cost vs. quality Pareto frontier:
-  frontier models first from cheapest up (the knee point highlighted), then dominated models
-  by their distance to the frontier. Type to filter (`zai`, `claude37`, `gemini25` all work;
-  punctuation is ignored). **Tab** switches between the intelligence and coding index.
+  frontier models first from cheapest up, then dominated models by their gap to the frontier.
+  `★ OPTIMAL` marks frontier models, `★ EFFICIENT` the frontier's efficient point (best quality
+  gain per dollar), and `-N pts` a dominated model's score gap. Type to filter (`zai`,
+  `claude37`, `gemini25` all work; punctuation is ignored). **Tab** switches between the
+  intelligence and coding index; the active metric is shown in the status line.
 - **Providers view** – **Enter** on a model ranks its endpoints by ProviderUtility scored
-  cost. **Tab** or **a** toggles between the primary quantization and all variants.
+  cost per 1M tokens. **Tab** or **a** toggles between the primary quantization and all variants.
 - **Detail view** – **Enter** on a provider shows the full cost breakdown and pricing.
 - Navigation: Up/Down or Ctrl-P/N, PgUp/PgDn, mouse wheel and click, Esc/Backspace to go
   back (Esc clears the search first), Ctrl-C to quit. Runs in the alternate screen buffer so
@@ -73,16 +79,19 @@ ProviderUtility Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Mode: Full Utility Model  •  Turn: 2000 prompt + 500 completion tokens  •  Time Value: $0.00/hr
 Shrinkage: prior=50%, weight=1.0B tokens  •  Discounts: Applied  •  Failure Risk: Yes  •  Quantization: primary
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider           Scored Cost   Token Cost   Fail Risk  CacheHit   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
+Provider            Scored $/M    Token $/M    Fail $/M  CacheHit   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                 $0.000086    $0.000085   $0.000002     87.9%    88.0%   $0.0075    $0.0375     4.37s     28    96.8%
-NovitaAI             $0.000091    $0.000090   $0.000001     78.9%    79.5%   $0.0075    $0.0375     1.58s     39    98.9%
-GMICloud             $0.000099    $0.000096   $0.000003     69.3%    69.5%   $0.0075    $0.0375     6.39s     20    93.6%
-DeepInfra            $0.000102    $0.000102   $0.000000     58.9%    59.9%   $0.0075    $0.0375     0.84s     30    99.4%
-Modal                $0.000124    $0.000124   $0.000000     74.7%    75.6%   $0.0100    $0.0500     0.56s     47    99.9%
+Z.ai                   $0.0344      $0.0340     $0.0008     87.9%    88.0%   $0.0075    $0.0375     4.37s     28    96.8%
+NovitaAI               $0.0364      $0.0360     $0.0004     78.9%    79.5%   $0.0075    $0.0375     1.58s     39    98.9%
+GMICloud               $0.0396      $0.0384     $0.0012     69.3%    69.5%   $0.0075    $0.0375     6.39s     20    93.6%
+DeepInfra              $0.0408      $0.0408     $0.0000     58.9%    59.9%   $0.0075    $0.0375     0.84s     30    99.4%
+Modal                  $0.0496      $0.0496     $0.0000     74.7%    75.6%   $0.0100    $0.0500     0.56s     47    99.9%
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Lower Scored Cost is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.
+Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.
 ```
+
+Costs are computed for one turn (2000 prompt + 500 completion tokens by default) and shown
+per 1M tokens: `Scored $/M` = `Token $/M` + `Time $/M` + `Fail $/M`.
 
 By default only the model's primary quantization (usually `fp8`) is shown, matching the
 variant OpenRouter prices on the web. Pass `--all-quants` to see community variants too.
@@ -105,22 +114,23 @@ Provider Pareto Frontier: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Turn: 2000 prompt + 500 completion tokens
 Objectives: Cost ↓  Latency ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quantization: primary
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider           Scored Cost   Token Cost   Latency    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage
+Provider            Scored $/M    Token $/M   Latency    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                 $0.000086    $0.000085     4.37s     28     87.9%    96.8%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
-NovitaAI             $0.000091    $0.000090     1.58s     39     78.9%    98.9%  ★ OPTIMAL        Balanced Trade-off
-GMICloud             $0.000099    $0.000096     6.39s     20     69.3%    93.6%  Dominated        --
-DeepInfra            $0.000102    $0.000102     0.84s     30     58.9%    99.4%  ★ OPTIMAL        Balanced Trade-off
-Modal                $0.000124    $0.000124     0.56s     47     74.7%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
+Z.ai                   $0.0344      $0.0340     4.37s     28     87.9%    96.8%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
+NovitaAI               $0.0364      $0.0360     1.58s     39     78.9%    98.9%  ★ OPTIMAL        Balanced Trade-off
+GMICloud               $0.0396      $0.0384     6.39s     20     69.3%    93.6%  Dominated        --
+DeepInfra              $0.0408      $0.0408     0.84s     30     58.9%    99.4%  ★ OPTIMAL        Balanced Trade-off
+Modal                  $0.0496      $0.0496     0.56s     47     74.7%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ★ OPTIMAL marks non-dominated providers: no other provider is at least as good on every objective and better on one.
 ```
 
-### `model_frontier.py` — cost vs. quality frontier with knee detection
+### `model_frontier.py` — cost vs. quality frontier
 
 Joins OpenRouter's published Artificial Analysis indices (intelligence, coding, agentic) with
-live pricing and finds the models no cheaper model out-scores. The **knee** is the frontier
-model with the best normalised quality gain per dollar.
+live pricing and finds the models no cheaper model out-scores. The **efficient point** is the
+frontier model with the best normalised quality gain per dollar, the maximum-gradient point of
+the frontier.
 
 ```bash
 ./model_frontier.py                                 # intelligence index vs list prompt price
@@ -137,12 +147,36 @@ Model                        ID                             Intelligence Score  
 ──────────────────────────────────────────────────────────────────────────────────────────────────
 Ling 3.0 Flash               inclusionai/ling-3.0-flash                   37.8               $0.02  ON FRONTIER
 Solar Pro 4                  upstage/solar-pro4                           41.6               $0.03  ON FRONTIER
-GLM-5.3-Flash                z-ai/glm-5.3-flash                           57.5               $0.07  ← KNEE
+GLM-5.3-Flash                z-ai/glm-5.3-flash                           57.5               $0.07  ← EFFICIENT
 Gemini 3.8 Flash (high)      google/gemini-3.8-flash                      58.7               $0.75  ON FRONTIER
 GLM-5.3 (max)                z-ai/glm-5.3                                 59.5               $1.40  ON FRONTIER
 ```
 
-### `get_models.py` — catalog search and inspection
+### `model_router.py` — model and provider for a required score
+
+Picks a benchmarked model whose Artificial Analysis score meets a threshold, then that
+model's best provider from the ProviderUtility scorer. Two modes choose the model:
+
+- `cheapest` – the cheapest model at or above the score.
+- `efficient` – the efficient point of the cost/quality frontier built from the models at or
+  above the score: the most quality gained per dollar once the level is met.
+
+Models with no active provider are skipped in favour of the next best qualifying one.
+
+```bash
+./model_router.py 60                                # cheapest model with intelligence >= 60
+./model_router.py 60 --mode efficient               # most quality per dollar above 60
+./model_router.py 45 --metric coding --time-value 30
+./model_router.py 70 --json
+```
+
+```python
+from model_router import route
+r = route(60, metric="intelligence", mode="efficient")
+r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
+```
+
+`get_models.py` — catalog search and inspection
 
 ```bash
 ./get_models.py z-ai/glm-5.3-flash               # detail card: context, pricing, description
@@ -217,7 +251,9 @@ $$
 \text{totalCost} = \text{tokenCost} + \text{timeCost} + \text{failureCost}
 $$
 
-`--time-value 0 --no-failures` reduces this to the pure token cost model.
+All four are per-turn dollar amounts; the tools display them normalised to 1M tokens,
+$\text{cost} \cdot 10^6 / (C + O)$. `--time-value 0 --no-failures` reduces this to the pure
+token cost model.
 
 ## Pareto analysis
 
@@ -233,10 +269,10 @@ model is on the frontier when its score exceeds every cheaper model's score. For
 model, the reported gap is the best frontier score available at or below its cost minus its own
 score.
 
-**Knee point.** Both axes are min–max normalised over the frontier to $[0,1]$. The knee is the
-frontier model maximising $\hat{s} - \hat{c}$, i.e. the point furthest above the chord joining
-the cheapest and the best-scoring frontier models. That is where the marginal quality gained per
-dollar starts to fall off.
+**Efficient point.** Both axes are min–max normalised over the frontier to $[0,1]$. The
+efficient point is the frontier model maximising $\hat{s} - \hat{c}$, i.e. the point furthest
+above the chord joining the cheapest and the best-scoring frontier models. That is where the
+marginal quality gained per dollar starts to fall off.
 
 ## Python API
 
@@ -246,9 +282,9 @@ from openrouter_analytics import (
     Objective, pareto_mask,
 )
 
-# Rank providers by expected cost per turn (token cost + failure risk by default).
+# Rank providers by expected cost (token cost + failure risk by default).
 for s in score_model_providers("z-ai/glm-5.3-flash")[:3]:
-    print(f"{s.provider_name:<12} {s.formatted_total_cost}  cache hit used {s.formatted_h_used}")
+    print(f"{s.provider_name:<12} {s.formatted_total_cost}/M  cache hit used {s.formatted_h_used}")
 
 # A longer-context agentic turn, valuing time at $30/hr.
 cfg = ScoringConfig(prompt_tokens=8000, completion_tokens=1000, time_value_usd_per_hour=30.0)
@@ -270,13 +306,13 @@ frontier = [s.provider_name for s, ok in zip(scores, mask) if ok]
 
 ## Data sources
 
-| Endpoint | Provides |
-|---|---|
-| `api/frontend/v1/stats/effective-pricing` | per-endpoint 24h cache hit rate, effective prices, token volume |
-| model page RSC payload (`openrouter.ai/models/<slug>`) | p50/p90 latency and throughput, 24h uptime |
-| `api/v1/models/<slug>/endpoints` | list pricing incl. cache read/write, quantization, uptime fallback |
-| `api/v1/models` | catalog: context length, modality, list pricing |
-| `api/frontend/v1/rankings/benchmarks` | Artificial Analysis intelligence / coding / agentic indices |
+| Endpoint                                               | Provides                                                           |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `api/frontend/v1/stats/effective-pricing`              | per-endpoint 24h cache hit rate, effective prices, token volume    |
+| model page RSC payload (`openrouter.ai/models/<slug>`) | p50/p90 latency and throughput, 24h uptime                         |
+| `api/v1/models/<slug>/endpoints`                       | list pricing incl. cache read/write, quantization, uptime fallback |
+| `api/v1/models`                                        | catalog: context length, modality, list pricing                    |
+| `api/frontend/v1/rankings/benchmarks`                  | Artificial Analysis intelligence / coding / agentic indices        |
 
 Connections are forced to IPv4 to avoid a ~10 s IPv6 stall on macOS.
 

@@ -11,7 +11,7 @@ time-value guess, this reports which providers are non-dominated across five obj
     maximise  24h uptime
 
 A secondary ``--models`` mode runs a catalog-wide frontier over turn cost, context length,
-cache-read price, and completion price. For a cost-vs-benchmark-quality frontier with knee
+cache-read price, and completion price. For a cost-vs-benchmark-quality frontier with efficient point
 detection, see model_frontier.py.
 
 Usage:
@@ -105,8 +105,8 @@ def compute_provider_pareto(candidates: List[ProviderCandidate]) -> List[Provide
 def print_provider_table(candidates: List[ProviderCandidate], model_name: str, cfg: ScoringConfig, filter_desc: str) -> None:
     cols = [
         Column("Provider", 16),
-        Column("Scored Cost", 12, ">"),
-        Column("Token Cost", 11, ">"),
+        Column("Scored $/M", 12, ">"),
+        Column("Token $/M", 11, ">"),
         Column("Latency", 8, ">"),
         Column("TPS", 5, ">"),
         Column("CacheHit", 8, ">"),

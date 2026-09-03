@@ -74,11 +74,11 @@ def evaluate_provider_utility(
 
 def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringConfig, quant_desc: str) -> None:
     show_time = cfg.time_value_usd_per_hour > 0
-    cols = [Column("Provider", 16), Column("Scored Cost", 12, ">"), Column("Token Cost", 11, ">")]
+    cols = [Column("Provider", 16), Column("Scored $/M", 12, ">"), Column("Token $/M", 11, ">")]
     if show_time:
-        cols.append(Column("Time Cost", 11, ">"))
+        cols.append(Column("Time $/M", 11, ">"))
     if cfg.price_failures:
-        cols.append(Column("Fail Risk", 10, ">"))
+        cols.append(Column("Fail $/M", 10, ">"))
     cols += [
         Column("CacheHit", 8, ">"),
         Column("h(pub)", 7, ">"),
@@ -119,7 +119,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
             f"  •  Discounts: {'Applied' if cfg.apply_discount else 'List Price'}"
             f"  •  Failure Risk: {'Yes' if cfg.price_failures else 'No'}  •  {quant_desc}",
         ],
-        footer="Lower Scored Cost is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.",
+        footer="Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.",
     )
 
 

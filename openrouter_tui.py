@@ -3,7 +3,7 @@
 
 Views:
   1. Models     - the catalog ranked by the cost vs. quality Pareto frontier (frontier models
-                  first, cheapest to most expensive, with the knee highlighted; then dominated
+                  first, cheapest to most expensive, with the efficient point highlighted; then dominated
                   models by distance to the frontier). Type to fuzzy-filter; Tab toggles the
                   benchmark metric between intelligence and coding.
   2. Providers  - Enter on a model lists its endpoints ranked by ProviderUtility scored cost.
@@ -17,6 +17,7 @@ Runs in the alternate screen buffer so the normal terminal scrollback is untouch
 """
 
 import os
+import re
 import select
 import shutil
 import sys
@@ -45,6 +46,10 @@ DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
 GREEN = "\x1b[32m"
 BOLD_YELLOW = "\x1b[1;33m"
+CYAN = "\x1b[36m"
+BOLD_CYAN = "\x1b[1;36m"
+KEY = "\x1b[1;33m"          # key names in the help line
+BADGE = KEY                  # the active filter / metric mode
 HILITE = "\x1b[48;5;237;1m"
 
 KEYS_UP = ("\x1b[A", "\x1bOA", "\x10")
@@ -57,6 +62,7 @@ KEY_ESC = "\x1b"
 KEY_CTRL_C = "\x03"
 PAGE = 5
 TABLE_FIRST_ROW = 4  # 1-based terminal row of the first data row (bar, header, rule above it)
+MODEL_NAME_MIN_W = 32  # Model Name column never shrinks below this
 
 
 # ------------------------------------------------------------------ data
@@ -78,8 +84,8 @@ def build_model_list(metric: str) -> Tuple[List[Dict[str, Any]], int]:
     """Benchmarked models sorted by frontier position; returns ``(models, frontier_size)``."""
     catalog, raw_bench = load_data()
     candidates = build_candidates(catalog, raw_bench, metric, price_source="list")
-    frontier, knee = cost_quality_frontier(candidates)
-    annotate_frontier(candidates, frontier, knee)
+    frontier, efficient = cost_quality_frontier(candidates)
+    annotate_frontier(candidates, frontier, efficient)
     candidates.sort(key=frontier_sort_key)
     return candidates, len(frontier)
 
@@ -96,7 +102,7 @@ def get_key() -> str:
         seq = os.read(fd, 1).decode("utf-8", errors="ignore")
         if seq == KEY_ESC:
             while select.select([fd], [], [], 0.02)[0]:
-                more = os.read(fd, 64).decode("utf-8", errors="ignore")
+                more = os.read(fd, 256).decode("utf-8", errors="ignore")
                 if not more:
                     break
                 seq += more
@@ -106,23 +112,27 @@ def get_key() -> str:
 
 
 def clear_screen() -> None:
-    sys.stdout.write("\x1b[2J" + HOME)
-    sys.stdout.flush()
+    """Home the cursor and erase everything below it, so each frame starts on a blank buffer."""
+    sys.stdout.write(HOME + CLEAR_BELOW)
 
 
 def write(s: str = "") -> None:
     sys.stdout.write(s + "\n")
 
 
-def parse_mouse(key: str) -> Optional[Tuple[int, int, int, bool]]:
-    """Decode an SGR mouse report into ``(button, col, row, is_release)``."""
-    if not key.startswith("\x1b[<"):
-        return None
-    try:
-        parts = key[3:-1].split(";")
-        return int(parts[0]), int(parts[1]), int(parts[2]), key.endswith("m")
-    except (ValueError, IndexError):
-        return None
+_MOUSE_RE = re.compile(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+
+
+def parse_mouse(key: str) -> List[Tuple[int, int, int, bool]]:
+    """Decode every SGR mouse report in the buffer into ``(button, col, row, is_release)``.
+
+    Rapid wheel ticks arrive concatenated in a single read; decoding all of them
+    keeps fast scrolling from dropping events.
+    """
+    events = []
+    for button, col, row, kind in _MOUSE_RE.findall(key):
+        events.append((int(button), int(col), int(row), kind == "m"))
+    return events
 
 
 def navigate(key: str, idx: int, count: int, scroll: int, visible: int) -> Tuple[Optional[int], bool]:
@@ -136,18 +146,21 @@ def navigate(key: str, idx: int, count: int, scroll: int, visible: int) -> Tuple
         return max(0, idx - PAGE), False
     if key in KEYS_PGDN:
         return min(last, idx + PAGE), False
-    mouse = parse_mouse(key)
-    if mouse:
-        button, _, row, released = mouse
-        if button in (64, 68):
-            return max(0, idx - PAGE), False
-        if button in (65, 69):
-            return min(last, idx + PAGE), False
-        if button == 0 and not released and TABLE_FIRST_ROW <= row < TABLE_FIRST_ROW + visible:
-            clicked = scroll + (row - TABLE_FIRST_ROW)
-            if 0 <= clicked < count:
-                return clicked, clicked == idx
-        return idx, False
+    events = parse_mouse(key)
+    if events:
+        orig = idx
+        clicked = False
+        for button, _, row, released in events:
+            if button >= 64 and (button - 64) % 4 == 0:  # wheel up, incl. modifier variants
+                idx = max(0, idx - PAGE)
+            elif button >= 65 and (button - 65) % 4 == 0:  # wheel down
+                idx = min(last, idx + PAGE)
+            elif button == 0 and not released and TABLE_FIRST_ROW <= row < TABLE_FIRST_ROW + visible:
+                hit = scroll + (row - TABLE_FIRST_ROW)
+                if 0 <= hit < count:
+                    idx = hit
+                    clicked = hit == orig
+        return idx, clicked
     return None, False
 
 
@@ -166,14 +179,36 @@ def pad_rows(rendered: int, viewport: int) -> None:
         write()
 
 
+def styled(segments: List[Tuple[str, str]], width: int) -> str:
+    """Join ``(style, text)`` segments, clipping the *visible* text to ``width`` columns."""
+    out, room = [], width
+    for style, text in segments:
+        if room <= 0:
+            break
+        out.append(f"{style}{text[:room]}{RESET}" if style else text[:room])
+        room -= len(text)
+    return "".join(out)
+
+
+def help_line(pairs: List[Tuple[str, str]], width: int) -> str:
+    """Render ``(key, action)`` pairs as a single help line with the keys highlighted."""
+    segments: List[Tuple[str, str]] = []
+    for i, (key, action) in enumerate(pairs):
+        if i:
+            segments.append(("", "   "))
+        segments.extend([(KEY, key), ("", f" {action}")])
+    return styled(segments, width)
+
+
 # ------------------------------------------------------------------ views
 
-MODEL_COLS_BASE = [Column("Status", 14), Column("Model Name", 32), Column("Model ID", 30)]
+MODEL_STATUS_COL = Column("Status", 14)
+MODEL_ID_COL = Column("Model ID", 30)
 PROVIDER_COLS = [
     Column("Provider", 16),
-    Column("Scored Cost", 12, ">"),
-    Column("Token Cost", 11, ">"),
-    Column("Fail Risk", 10, ">"),
+    Column("Scored $/M", 12, ">"),
+    Column("Token $/M", 11, ">"),
+    Column("Fail $/M", 10, ">"),
     Column("CacheHit", 8, ">"),
     Column("Latency", 8, ">"),
     Column("TPS", 5, ">"),
@@ -192,35 +227,39 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
     idx = min(idx, len(filtered) - 1) if filtered else 0
     scroll, visible = scroll_window(idx, scroll, len(filtered), viewport)
 
-    sys.stdout.write(HOME)
-    prompt = f"Search Models: {query}█"
-    status = f"[{len(filtered)}/{len(models)} models | {frontier_count} on frontier | metric: {metric}]"
-    gap = " " * max(2, width - len(prompt) - len(status) - 2)
-    write(f"\x1b[1;36m{prompt}{RESET}{gap}{DIM}{status}{RESET}")
+    clear_screen()
+    write(styled([
+        (BOLD_CYAN, f"Search Models: {query}█"),
+        ("", "   "),
+        (BOLD, f"{len(filtered)}/{len(models)}"), ("", " models   "),
+        (BOLD, str(frontier_count)), ("", " on frontier   "),
+        ("", "metric: "), (BADGE, metric),
+    ], width - 1))
 
-    cols = MODEL_COLS_BASE + [Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
-                              Column("Prompt $/M", 12, ">"), Column("Output $/M", 11, ">")]
+    name_w = max([MODEL_NAME_MIN_W] + [len(m["name"]) for m in models])
+    cols = [MODEL_STATUS_COL, Column("Model Name", name_w), MODEL_ID_COL,
+            Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
+            Column("Prompt $/M", 12, ">"), Column("Output $/M", 11, ">")]
     head = header_line(cols)
     write(f"{BOLD}{head[:width - 1]}{RESET}")
     write("─" * min(width - 1, len(head)))
 
     if not filtered:
-        write(f"{DIM}  (no models matching '{query}'){RESET}")
-        pad_rows(1, viewport)
+        pad_rows(0, viewport)
     else:
         end = min(len(filtered), scroll + visible)
         for i in range(scroll, end):
             m = filtered[i]
-            knee, front = m["is_knee"], m["on_frontier"]
-            status = "★ KNEE" if knee else "★ OPTIMAL" if front else f"-{m['dist']:.1f} pts"
+            efficient, front = m["is_efficient"], m["on_frontier"]
+            status = "★ EFFICIENT" if efficient else "★ OPTIMAL" if front else f"-{m['dist']:.1f} pts"
             line = format_row(
-                [status, m["name"][:32], m["id"][:30], f"{m['score']:.1f}", _usd(m["cost"]), _usd(m["compl_p"] or 0.0)],
+                [status, m["name"][:name_w], m["id"][:30], f"{m['score']:.1f}", _usd(m["cost"]), _usd(m["compl_p"] or 0.0)],
                 cols,
             )[: width - 1]
             if i == idx:
-                colour = HILITE + ("\x1b[33m" if knee else "\x1b[32m" if front else "")
+                colour = HILITE + ("\x1b[33m" if efficient else "\x1b[32m" if front else "")
                 write(f"{colour}{line}{RESET}")
-            elif knee:
+            elif efficient:
                 write(f"{BOLD_YELLOW}{line[:14]}{RESET}{line[14:]}")
             elif front:
                 write(f"{GREEN}{line[:14]}{RESET}{line[14:]}")
@@ -228,9 +267,13 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
                 write(f"{DIM}{line}{RESET}")
         pad_rows(end - scroll, viewport)
 
-    write(f"\n{DIM}Enter: providers  •  Tab: toggle metric  •  Up/Down: move  •  Esc: clear / exit{RESET}"[: width + 8])
-    write(f"{DIM}Cost vs. quality Pareto frontier. ★ KNEE = best quality gain per dollar; '-N pts' = gap to frontier.{RESET}"[: width + 8])
-    sys.stdout.write(CLEAR_BELOW)
+    write()
+    write(help_line([("Enter", "providers"), ("Tab", "toggle metric"), ("↑/↓", "move"), ("Esc", "clear / exit")], width - 1))
+    sys.stdout.write(styled([
+        (BOLD_YELLOW, "★ EFFICIENT"), ("", " best quality gain per dollar   "),
+        (GREEN, "★ OPTIMAL"), ("", " on the cost/quality frontier   "),
+        ("", "-N pts gap to frontier"),
+    ], width - 1))
     sys.stdout.flush()
     return filtered, idx, scroll
 
@@ -240,9 +283,11 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
     idx = min(idx, len(active) - 1) if active else 0
     scroll, visible = scroll_window(idx, scroll, len(active), viewport)
 
-    sys.stdout.write(HOME)
-    quant_tag = "[quants: ALL]" if all_quants else "[quants: primary]"
-    write(f"Providers for: \x1b[1;36m{model['name']}{RESET} ({model['id']})  •  {quant_tag}"[: width + 12])
+    clear_screen()
+    write(styled([
+        ("", "Providers for: "), (BOLD_CYAN, model["name"]), ("", f" ({model['id']})   "),
+        ("", "quants: "), (BADGE, "all" if all_quants else "primary"),
+    ], width - 1))
     head = header_line(PROVIDER_COLS)
     write(f"{BOLD}{head[:width - 1]}{RESET}")
     write("─" * min(width - 1, len(head)))
@@ -269,31 +314,30 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
                 write(f"{best}{line}{RESET}")
         pad_rows(end - scroll, viewport)
 
-    write(f"\n{DIM}Esc / Backspace / q: back  •  Tab / a: toggle quants  •  Enter: provider detail{RESET}"[: width + 8])
-    write(f"{DIM}Ranked by ProviderUtility scored cost per turn (2000 prompt + 500 completion tokens). #1 is cheapest.{RESET}"[: width + 8])
-    sys.stdout.write(CLEAR_BELOW)
+    write()
+    write(help_line([("Enter", "provider detail"), ("Tab", "toggle quants"), ("↑/↓", "move"), ("Esc", "back")], width - 1))
+    sys.stdout.write("Ranked by scored cost per 1M tok on a 2000 prompt + 500 completion turn. #1 is cheapest."[: width - 1])
     sys.stdout.flush()
     return active, idx, scroll
 
 
 def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
-    sys.stdout.write(HOME)
+    clear_screen()
     rule = "─" * min(width - 1, 78)
     write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})")
     write(rule)
-    write(f"  Scored Cost per Turn:   \x1b[1;32m{s.formatted_total_cost}{RESET}")
-    write(f"  Token Cost per Turn:    {s.formatted_token_cost}")
-    write(f"  Failure Risk Penalty:   {s.formatted_failure_cost}")
-    write(f"  Time Opportunity Cost:  {s.formatted_time_cost}")
-    write(f"  Prompt Cache Hit Rate:  used {BOLD}{s.formatted_h_used}{RESET}  (published 24h: {s.formatted_h_raw})")
-    write(f"  Cache Read (Hit) Price: ${s.hit_price:.4f} / M tokens")
-    write(f"  Cache Write/Miss Price: ${s.miss_price:.4f} / M tokens")
-    write(f"  Completion Price:       ${s.out_price:.4f} / M tokens")
-    write(f"  Latency (TTFT):         {fmt_seconds(s.ttft_seconds)}  |  Throughput: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
-    write(f"  Quantization Variant:   {s.quantization.upper()}")
+    write(f"  Scored Cost (per 1M tok):   \x1b[1;32m{s.formatted_total_cost}{RESET}")
+    write(f"  Token Cost (per 1M tok):    {s.formatted_token_cost}")
+    write(f"  Failure Risk (per 1M tok):  {s.formatted_failure_cost}")
+    write(f"  Time Cost (per 1M tok):     {s.formatted_time_cost}")
+    write(f"  Prompt Cache Hit Rate:      used {BOLD}{s.formatted_h_used}{RESET}  (published 24h: {s.formatted_h_raw})")
+    write(f"  Cache Read (Hit) Price:     ${s.hit_price:.4f} per 1M tok")
+    write(f"  Cache Write/Miss Price:     ${s.miss_price:.4f} per 1M tok")
+    write(f"  Completion Price:           ${s.out_price:.4f} per 1M tok")
+    write(f"  Latency (TTFT):             {fmt_seconds(s.ttft_seconds)}  |  Throughput: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
+    write(f"  Quantization Variant:       {s.quantization.upper()}")
     write(rule)
-    write(f"{DIM}Press any key to return to the providers table.{RESET}")
-    sys.stdout.write(CLEAR_BELOW)
+    write(help_line([("Any key", "back to providers")], width - 1))
     sys.stdout.flush()
 
 
@@ -313,11 +357,10 @@ def run_tui() -> None:
     all_quants = False
 
     sys.stdout.write(ALT_SCREEN_ON)
-    clear_screen()
     try:
         while True:
             width, height = shutil.get_terminal_size((100, 30))
-            viewport = max(2, height - 7)
+            viewport = max(2, height - 6)
 
             if view == "MODELS":
                 filtered, m_idx, m_scroll = draw_models(models, query, metric, frontier_count, m_idx, m_scroll, width, viewport)
@@ -327,15 +370,12 @@ def run_tui() -> None:
                     m_idx = new_idx
                     if clicked and filtered:
                         selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
-                        clear_screen()
                 elif key == "\t":
                     metric = "coding" if metric == "intelligence" else "intelligence"
                     models, frontier_count = build_model_list(metric)
                     m_idx = m_scroll = 0
-                    clear_screen()
                 elif key in KEYS_ENTER and filtered:
                     selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
-                    clear_screen()
                 elif key in (KEY_ESC, KEY_CTRL_C):
                     if query and key == KEY_ESC:
                         query, m_idx = "", 0
@@ -354,7 +394,6 @@ def run_tui() -> None:
                     write(f"Fetching provider analytics for {selected['id']}...")
                     sys.stdout.flush()
                     scores = score_model_providers(selected["permaslug"], config=ScoringConfig())
-                    clear_screen()
                 active, p_idx, p_scroll = draw_providers(selected, scores, all_quants, p_idx, p_scroll, width, viewport)
                 key = get_key()
                 new_idx, clicked = navigate(key, p_idx, len(active), p_scroll, min(len(active), viewport))
@@ -362,17 +401,13 @@ def run_tui() -> None:
                     p_idx = new_idx
                     if clicked and active:
                         view = "DETAIL"
-                        clear_screen()
                 elif key in ("\t", "a", "A"):
                     all_quants = not all_quants
                     p_idx = p_scroll = 0
-                    clear_screen()
                 elif key in (KEY_ESC, "q", "Q", "\x1b[D", "\x1bOD") or key in KEYS_BACKSPACE:
                     view, scores = "MODELS", []
-                    clear_screen()
                 elif key in KEYS_ENTER and active:
                     view = "DETAIL"
-                    clear_screen()
                 elif key == KEY_CTRL_C:
                     break
 
@@ -382,7 +417,6 @@ def run_tui() -> None:
                 if get_key() == KEY_CTRL_C:
                     break
                 view = "PROVIDERS"
-                clear_screen()
     finally:
         sys.stdout.write(ALT_SCREEN_OFF)
         sys.stdout.flush()
