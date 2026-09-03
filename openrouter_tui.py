@@ -3,6 +3,7 @@
 openrouter-tui - Interactive Terminal UI for OpenRouter Analytics.
 
 Features:
+  - Alternate Screen Buffer (\x1b[?1049h) - removes console buffer at top, restores on exit.
   - Model Explorer sorted by the Cost vs. Quality Pareto Frontier
     (powered by live OpenRouter / Artificial Analysis benchmark scores).
     Top models are on the frontier from lowest cost to highest, highlighting the KNEE point,
@@ -119,12 +120,10 @@ def build_pareto_model_catalog(metric: str = "intelligence") -> Tuple[List[Dict[
     frontier, knee_idx = compute_pareto(candidates)
     frontier_ids = {m["id"] for m in frontier}
 
-    # Mark frontier status and knee
     for item in candidates:
         item["on_frontier"] = item["id"] in frontier_ids
         item["is_knee"] = knee_idx is not None and item["id"] == frontier[knee_idx]["id"]
 
-    # Calculate distance to frontier for dominated models
     if frontier:
         for item in candidates:
             if item["on_frontier"]:
@@ -175,15 +174,13 @@ def get_key() -> str:
 # ==============================================================================
 
 def run_tui():
-    current_metric = "intelligence"  # "intelligence" or "coding"
+    current_metric = "intelligence"
     models, frontier_count = build_pareto_model_catalog(current_metric)
 
-    current_view = "MODELS"  # "MODELS" or "PROVIDERS" or "DETAIL"
+    current_view = "MODELS"  # "MODELS", "PROVIDERS", "DETAIL"
     query = ""
     selected_idx = 0
     scroll_offset = 0
-    first_draw = True
-    last_total_lines = 0
 
     # Selected model state
     selected_model_dict: Optional[Dict[str, Any]] = None
@@ -192,13 +189,14 @@ def run_tui():
     provider_scroll_offset = 0
     filter_all_quants = False
 
-    # Hide cursor and enable SGR mouse tracking
-    sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")
+    # Switch to Alternate Screen Buffer, clear screen, home cursor, hide cursor, enable mouse
+    sys.stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\x1b[?1000h\x1b[?1006h")
     sys.stdout.flush()
 
     try:
         while True:
             term_width, term_height = shutil.get_terminal_size((100, 30))
+            viewport_height = max(2, term_height - 7)
 
             # ==================================================================
             # VIEW 1: MODEL SELECTION LIST
@@ -207,22 +205,15 @@ def run_tui():
                 filtered_models = [m for m in models if matches_query(query, m)] if query else models
                 selected_idx = max(0, min(selected_idx, len(filtered_models) - 1)) if filtered_models else 0
 
-                num_visible = min(len(filtered_models), max(2, term_height - 7))
+                num_visible = min(len(filtered_models), viewport_height)
 
                 if selected_idx < scroll_offset:
                     scroll_offset = selected_idx
                 elif selected_idx >= scroll_offset + num_visible:
                     scroll_offset = max(0, selected_idx - num_visible + 1)
 
-                total_lines = num_visible + 5
-
-                if not first_draw:
-                    sys.stdout.write(f"\x1b[{last_total_lines}A\r")
-                else:
-                    first_draw = False
-
-                last_total_lines = total_lines
-                sys.stdout.write("\x1b[J")
+                # Home cursor to top-left of alternate buffer
+                sys.stdout.write("\x1b[H")
 
                 # 1. Search Bar
                 search_prompt = f"Search Models: {query}█"
@@ -246,60 +237,65 @@ def run_tui():
                 sys.stdout.write(f"\x1b[1m{header_str[:term_width - 1]}\x1b[0m\n")
                 sys.stdout.write("─" * min(term_width - 1, len(header_str)) + "\n")
 
-                # 3. Model Rows
-                end_idx = min(len(filtered_models), scroll_offset + num_visible)
-                for i in range(scroll_offset, end_idx):
-                    m = filtered_models[i]
-                    on_f = m["on_frontier"]
-                    is_k = m.get("is_knee", False)
+                # 3. Model Rows (guaranteed to fill viewport_height lines)
+                if not filtered_models:
+                    sys.stdout.write(f"\x1b[2m  (No models matching '{query}')\x1b[0m\n")
+                    for _ in range(viewport_height - 1):
+                        sys.stdout.write("\n")
+                else:
+                    end_idx = min(len(filtered_models), scroll_offset + num_visible)
+                    for i in range(scroll_offset, end_idx):
+                        m = filtered_models[i]
+                        on_f = m["on_frontier"]
+                        is_k = m.get("is_knee", False)
 
-                    if is_k:
-                        status_str = "★ KNEE"
-                    elif on_f:
-                        status_str = "★ OPTIMAL"
-                    else:
-                        status_str = f"-{m['dist']:.1f} pts"
-
-                    cost_str = f"${m['cost']:.4f}" if m['cost'] < 0.1 else f"${m['cost']:.2f}"
-                    compl_str = f"${m['compl_p']:.4f}" if m['compl_p'] < 0.1 else f"${m['compl_p']:.2f}"
-
-                    row_vals = [
-                        status_str,
-                        m["name"][:32],
-                        m["id"][:30],
-                        f"{m['score']:.1f}",
-                        cost_str,
-                        compl_str,
-                    ]
-
-                    line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
-                    line_clipped = line_str[:term_width - 1]
-
-                    if i == selected_idx:
                         if is_k:
-                            sys.stdout.write(f"\x1b[48;5;237;1;33m{line_clipped}\x1b[0m\n")
+                            status_str = "★ KNEE"
                         elif on_f:
-                            sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
+                            status_str = "★ OPTIMAL"
                         else:
-                            sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
-                    else:
-                        if is_k:
-                            sys.stdout.write(f"\x1b[1;33m★ KNEE\x1b[0m         {line_clipped[15:]}\n")
-                        elif on_f:
-                            sys.stdout.write(f"\x1b[32m★ OPTIMAL\x1b[0m      {line_clipped[15:]}\n")
-                        else:
-                            sys.stdout.write(f"\x1b[2m{line_clipped}\x1b[0m\n")
+                            status_str = f"-{m['dist']:.1f} pts"
 
-                rendered_rows = end_idx - scroll_offset
-                if rendered_rows < num_visible:
-                    for _ in range(num_visible - rendered_rows):
+                        cost_str = f"${m['cost']:.4f}" if m['cost'] < 0.1 else f"${m['cost']:.2f}"
+                        compl_str = f"${m['compl_p']:.4f}" if m['compl_p'] < 0.1 else f"${m['compl_p']:.2f}"
+
+                        row_vals = [
+                            status_str,
+                            m["name"][:32],
+                            m["id"][:30],
+                            f"{m['score']:.1f}",
+                            cost_str,
+                            compl_str,
+                        ]
+
+                        line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
+                        line_clipped = line_str[:term_width - 1]
+
+                        if i == selected_idx:
+                            if is_k:
+                                sys.stdout.write(f"\x1b[48;5;237;1;33m{line_clipped}\x1b[0m\n")
+                            elif on_f:
+                                sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
+                            else:
+                                sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
+                        else:
+                            if is_k:
+                                sys.stdout.write(f"\x1b[1;33m★ KNEE\x1b[0m         {line_clipped[15:]}\n")
+                            elif on_f:
+                                sys.stdout.write(f"\x1b[32m★ OPTIMAL\x1b[0m      {line_clipped[15:]}\n")
+                            else:
+                                sys.stdout.write(f"\x1b[2m{line_clipped}\x1b[0m\n")
+
+                    rendered_rows = end_idx - scroll_offset
+                    for _ in range(viewport_height - rendered_rows):
                         sys.stdout.write("\n")
 
                 # 4. Footer Help
                 footer1 = "Enter: Inspect Providers  •  [m]: Toggle Metric (Intel/Coding)  •  Up/Down: Move  •  Esc: Exit"
                 footer2 = "Cost vs. Quality Pareto Frontier: Top models are non-dominated. ★ KNEE = highest quality gain per $."
                 sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m")
+                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m\n")
+                sys.stdout.write("\x1b[J")
                 sys.stdout.flush()
 
                 # Input event
@@ -334,12 +330,12 @@ def run_tui():
                                             selected_idx = clicked_idx
                     except Exception:
                         pass
-                elif key in ("m", "M") and len(query) == 0:  # Toggle metric when search empty
+                elif key in ("m", "M") and len(query) == 0:
                     current_metric = "coding" if current_metric == "intelligence" else "intelligence"
                     models, frontier_count = build_pareto_model_catalog(current_metric)
                     selected_idx = 0
                     scroll_offset = 0
-                elif key in ("\r", "\n"):  # Enter
+                elif key in ("\r", "\n"):
                     if filtered_models:
                         selected_model_dict = filtered_models[selected_idx]
                         current_view = "PROVIDERS"
@@ -360,14 +356,13 @@ def run_tui():
             # ==================================================================
             elif current_view == "PROVIDERS":
                 if selected_model_dict and not provider_scores:
-                    sys.stdout.write(f"\x1b[{last_total_lines}A\r\x1b[J")
+                    sys.stdout.write("\x1b[H\x1b[J")
                     sys.stdout.write(f"Fetching provider analytics for {selected_model_dict['id']}...\n")
                     sys.stdout.flush()
                     cfg = ScoringConfig(prompt_tokens=2000, completion_tokens=500, time_value_usd_per_hour=0.0, price_failures=True)
                     provider_scores = score_model_providers(selected_model_dict["permaslug"], config=cfg)
-                    last_total_lines = 1
 
-                # Apply quantization filter (default: auto primary fp8 matching website)
+                # Apply quantization filter
                 active_scores = []
                 primary_quant = "fp8" if any(getattr(s, "quantization", "") == "fp8" for s in provider_scores) else None
                 for s in provider_scores:
@@ -377,22 +372,14 @@ def run_tui():
                     active_scores.append(s)
 
                 provider_selected_idx = max(0, min(provider_selected_idx, len(active_scores) - 1)) if active_scores else 0
-                num_visible = min(len(active_scores), max(2, term_height - 7))
+                num_visible = min(len(active_scores), viewport_height)
 
                 if provider_selected_idx < provider_scroll_offset:
                     provider_scroll_offset = provider_selected_idx
                 elif provider_selected_idx >= provider_scroll_offset + num_visible:
                     provider_scroll_offset = max(0, provider_selected_idx - num_visible + 1)
 
-                total_lines = num_visible + 5
-
-                if not first_draw:
-                    sys.stdout.write(f"\x1b[{last_total_lines}A\r")
-                else:
-                    first_draw = False
-
-                last_total_lines = total_lines
-                sys.stdout.write("\x1b[J")
+                sys.stdout.write("\x1b[H")
 
                 # Header Banner
                 m_title = selected_model_dict.get("name", selected_model_dict["id"])
@@ -419,50 +406,55 @@ def run_tui():
                 sys.stdout.write("─" * min(term_width - 1, len(header_str)) + "\n")
 
                 # Provider Rows
-                end_idx = min(len(active_scores), provider_scroll_offset + num_visible)
-                for i in range(provider_scroll_offset, end_idx):
-                    s = active_scores[i]
-                    lat_str = f"{s.ttft_seconds:.2f}s" if s.ttft_seconds else "--"
-                    tps_str = f"{s.throughput_tps:.0f}" if s.throughput_tps else "--"
-                    upt_str = f"{s.uptime_pct:.1f}%" if s.uptime_pct else "--"
+                if not active_scores:
+                    sys.stdout.write(f"\x1b[2m  (No active providers found for this model)\x1b[0m\n")
+                    for _ in range(viewport_height - 1):
+                        sys.stdout.write("\n")
+                else:
+                    end_idx = min(len(active_scores), provider_scroll_offset + num_visible)
+                    for i in range(provider_scroll_offset, end_idx):
+                        s = active_scores[i]
+                        lat_str = f"{s.ttft_seconds:.2f}s" if s.ttft_seconds else "--"
+                        tps_str = f"{s.throughput_tps:.0f}" if s.throughput_tps else "--"
+                        upt_str = f"{s.uptime_pct:.1f}%" if s.uptime_pct else "--"
 
-                    row_vals = [
-                        s.provider_name[:16],
-                        f"${s.total_cost_usd:.6f}",
-                        f"${s.token_cost_usd:.6f}",
-                        f"${s.failure_cost_usd:.6f}",
-                        f"{s.h_used * 100:.1f}%",
-                        lat_str,
-                        tps_str,
-                        upt_str,
-                        f"${s.hit_price:.4f}",
-                        f"${s.miss_price:.4f}",
-                    ]
+                        row_vals = [
+                            s.provider_name[:16],
+                            f"${s.total_cost_usd:.6f}",
+                            f"${s.token_cost_usd:.6f}",
+                            f"${s.failure_cost_usd:.6f}",
+                            f"{s.h_used * 100:.1f}%",
+                            lat_str,
+                            tps_str,
+                            upt_str,
+                            f"${s.hit_price:.4f}",
+                            f"${s.miss_price:.4f}",
+                        ]
 
-                    line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
-                    line_clipped = line_str[:term_width - 1]
+                        line_str = "  ".join(f"{val:>{w}}" if a == ">" else f"{val:<{w}}" for val, (_, w, a) in zip(row_vals, cols))
+                        line_clipped = line_str[:term_width - 1]
 
-                    if i == provider_selected_idx:
-                        if i == 0:
-                            sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
+                        if i == provider_selected_idx:
+                            if i == 0:
+                                sys.stdout.write(f"\x1b[48;5;237;1;32m{line_clipped}\x1b[0m\n")
+                            else:
+                                sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
                         else:
-                            sys.stdout.write(f"\x1b[48;5;237;1m{line_clipped}\x1b[0m\n")
-                    else:
-                        if i == 0:
-                            sys.stdout.write(f"\x1b[32m{line_clipped}\x1b[0m\n")
-                        else:
-                            sys.stdout.write(f"{line_clipped}\n")
+                            if i == 0:
+                                sys.stdout.write(f"\x1b[32m{line_clipped}\x1b[0m\n")
+                            else:
+                                sys.stdout.write(f"{line_clipped}\n")
 
-                rendered_rows = end_idx - provider_scroll_offset
-                if rendered_rows < num_visible:
-                    for _ in range(num_visible - rendered_rows):
+                    rendered_rows = end_idx - provider_scroll_offset
+                    for _ in range(viewport_height - rendered_rows):
                         sys.stdout.write("\n")
 
                 # Footer Help
                 footer1 = "Esc / Backspace / q: Back to Models  •  Tab / a: Toggle Quants  •  Enter: Provider Spec Card"
                 footer2 = "Providers ranked by ProviderUtility Scored Cost. #1 provides optimal economic turn utility."
                 sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
-                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m")
+                sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m\n")
+                sys.stdout.write("\x1b[J")
                 sys.stdout.flush()
 
                 # Input event
@@ -511,16 +503,8 @@ def run_tui():
             # ==================================================================
             elif current_view == "DETAIL":
                 p_stat = active_scores[provider_selected_idx]
-                lines_to_draw = 13
 
-                if not first_draw:
-                    sys.stdout.write(f"\x1b[{last_total_lines}A\r")
-                else:
-                    first_draw = False
-
-                last_total_lines = lines_to_draw
-                sys.stdout.write("\x1b[J")
-
+                sys.stdout.write("\x1b[H")
                 divider = "─" * min(term_width - 1, 78)
                 sys.stdout.write(f"\x1b[1;36mProvider Detail: {p_stat.provider_name}\x1b[0m  (for {selected_model_dict['id']})\n")
                 sys.stdout.write(divider + "\n")
@@ -539,7 +523,8 @@ def run_tui():
                 q_str = getattr(p_stat, "quantization", "unknown")
                 sys.stdout.write(f"  Quantization Variant:   {q_str.upper()}\n")
                 sys.stdout.write(divider + "\n")
-                sys.stdout.write("\x1b[2mPress any key, Esc, or Enter to return to providers table...\x1b[0m")
+                sys.stdout.write("\x1b[2mPress any key, Esc, or Enter to return to providers table...\x1b[0m\n")
+                sys.stdout.write("\x1b[J")
                 sys.stdout.flush()
 
                 key = get_key()
@@ -548,7 +533,8 @@ def run_tui():
                 current_view = "PROVIDERS"
 
     finally:
-        sys.stdout.write(f"\x1b[{last_total_lines}A\r\x1b[J\x1b[?1000l\x1b[?1006l\x1b[?25h")
+        # Restore normal screen buffer, show cursor, disable mouse
+        sys.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
 
 
