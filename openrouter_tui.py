@@ -169,6 +169,12 @@ def get_key() -> str:
     return ch
 
 
+def clear_buffer():
+    """Clears the terminal screen buffer and homes the cursor to (1, 1)."""
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.flush()
+
+
 # ==============================================================================
 # Terminal Interactive TUI Loop
 # ==============================================================================
@@ -190,8 +196,8 @@ def run_tui():
     filter_all_quants = False
 
     # Switch to Alternate Screen Buffer, clear screen, home cursor, hide cursor, enable mouse
-    sys.stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\x1b[?1000h\x1b[?1006h")
-    sys.stdout.flush()
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+    clear_buffer()
 
     try:
         while True:
@@ -326,6 +332,7 @@ def run_tui():
                                         if clicked_idx == selected_idx:
                                             selected_model_dict = filtered_models[selected_idx]
                                             current_view = "PROVIDERS"
+                                            clear_buffer()
                                         else:
                                             selected_idx = clicked_idx
                     except Exception:
@@ -335,12 +342,14 @@ def run_tui():
                     models, frontier_count = build_pareto_model_catalog(current_metric)
                     selected_idx = 0
                     scroll_offset = 0
+                    clear_buffer()
                 elif key in ("\r", "\n"):
                     if filtered_models:
                         selected_model_dict = filtered_models[selected_idx]
                         current_view = "PROVIDERS"
                         provider_selected_idx = 0
                         provider_scroll_offset = 0
+                        clear_buffer()
                 elif key in ("\x1b", "\x03"):  # Esc / Ctrl-C
                     break
                 elif key in ("\x7f", "\x08"):  # Backspace
@@ -356,11 +365,12 @@ def run_tui():
             # ==================================================================
             elif current_view == "PROVIDERS":
                 if selected_model_dict and not provider_scores:
-                    sys.stdout.write("\x1b[H\x1b[J")
+                    clear_buffer()
                     sys.stdout.write(f"Fetching provider analytics for {selected_model_dict['id']}...\n")
                     sys.stdout.flush()
                     cfg = ScoringConfig(prompt_tokens=2000, completion_tokens=500, time_value_usd_per_hour=0.0, price_failures=True)
                     provider_scores = score_model_providers(selected_model_dict["permaslug"], config=cfg)
+                    clear_buffer()
 
                 # Apply quantization filter
                 active_scores = []
@@ -489,12 +499,15 @@ def run_tui():
                     filter_all_quants = not filter_all_quants
                     provider_selected_idx = 0
                     provider_scroll_offset = 0
+                    clear_buffer()
                 elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D"):
                     current_view = "MODELS"
                     provider_scores = []
+                    clear_buffer()
                 elif key in ("\r", "\n"):
                     if active_scores:
                         current_view = "DETAIL"
+                        clear_buffer()
                 elif key == "\x03":
                     break
 
@@ -531,6 +544,7 @@ def run_tui():
                 if key == "\x03":
                     break
                 current_view = "PROVIDERS"
+                clear_buffer()
 
     finally:
         # Restore normal screen buffer, show cursor, disable mouse
