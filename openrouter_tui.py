@@ -8,12 +8,14 @@ Features:
     (powered by live OpenRouter / Artificial Analysis benchmark scores).
     Top models are on the frontier from lowest cost to highest, highlighting the KNEE point,
     followed by dominated models ordered by distance from the frontier.
-  - Press 'm' to toggle benchmark metric: Intelligence Index vs. Coding Index.
   - Real-time delimiter-agnostic fuzzy searching ('zai' matches 'z-ai' and 'z.ai',
     'glm53' matches 'glm-5.3-flash', 'claude' matches 'anthropic/claude-*').
+  - Up/Down navigation (supports standard ANSI \x1b[A/\x1b[B, SS3 \x1bOA/\x1bOB, Ctrl-P/N,
+    PgUp/PgDn, and mouse scroll/click).
+  - Press Tab to toggle benchmark metric: Intelligence Index vs. Coding Index.
+  - Transitions cleanly clear the buffer (\x1b[2J\x1b[H).
   - Provider scoring view when a model is selected, showing all endpoints ranked by
     ProviderUtility scored cost per turn (cache hit rates, shrinkage, latency, TPS, uptime).
-  - Keyboard & mouse navigation (Up/Down, PgUp/PgDn, Ctrl-P/N, Mouse wheel/clicks).
 """
 
 import sys
@@ -195,7 +197,7 @@ def run_tui():
     provider_scroll_offset = 0
     filter_all_quants = False
 
-    # Switch to Alternate Screen Buffer, clear screen, home cursor, hide cursor, enable mouse
+    # Switch to Alternate Screen Buffer, hide cursor, enable SGR mouse tracking
     sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
     clear_buffer()
 
@@ -297,7 +299,7 @@ def run_tui():
                         sys.stdout.write("\n")
 
                 # 4. Footer Help
-                footer1 = "Enter: Inspect Providers  •  [m]: Toggle Metric (Intel/Coding)  •  Up/Down: Move  •  Esc: Exit"
+                footer1 = "Enter: Inspect Providers  •  [Tab]: Toggle Metric (Intel/Coding)  •  Up/Down: Move  •  Esc: Exit"
                 footer2 = "Cost vs. Quality Pareto Frontier: Top models are non-dominated. ★ KNEE = highest quality gain per $."
                 sys.stdout.write(f"\n\x1b[2m{footer1[:term_width - 1]}\x1b[0m\n")
                 sys.stdout.write(f"\x1b[2m{footer2[:term_width - 1]}\x1b[0m\n")
@@ -306,15 +308,21 @@ def run_tui():
 
                 # Input event
                 key = get_key()
-                if key in ("\x1b[A", "\x10"):  # Up
+
+                # Up arrow (ANSI, SS3 application cursor mode, Ctrl-P)
+                if key in ('\x1b[A', '\x1bOA', '\x10'):
                     selected_idx = max(0, selected_idx - 1)
-                elif key in ("\x1b[B", "\x0e"):  # Down
+                # Down arrow (ANSI, SS3 application cursor mode, Ctrl-N)
+                elif key in ('\x1b[B', '\x1bOB', '\x0e'):
                     selected_idx = min(len(filtered_models) - 1, selected_idx + 1)
-                elif key in ("\x1b[5~", "\x1b[1;5A"):  # PgUp
+                # Page Up / Ctrl+Up / Shift+Up (jump 5)
+                elif key in ('\x1b[1;5A', '\x1b[1;6A', '\x1b[1;2A', '\x1b[1;3A', '\x1b[1;9A', '\x1b\x1b[A', '\x1b[5~'):
                     selected_idx = max(0, selected_idx - 5)
-                elif key in ("\x1b[6~", "\x1b[1;5B"):  # PgDn
+                # Page Down / Ctrl+Down / Shift+Down (jump 5)
+                elif key in ('\x1b[1;5B', '\x1b[1;6B', '\x1b[1;2B', '\x1b[1;3B', '\x1b[1;9B', '\x1b\x1b[B', '\x1b[6~'):
                     selected_idx = min(len(filtered_models) - 1, selected_idx + 5)
-                elif key.startswith("\x1b[<"):  # Mouse event
+                # Mouse event
+                elif key.startswith("\x1b[<"):
                     try:
                         is_release = key.endswith("m")
                         body = key[3:-1]
@@ -337,12 +345,14 @@ def run_tui():
                                             selected_idx = clicked_idx
                     except Exception:
                         pass
-                elif key in ("m", "M") and len(query) == 0:
+                # Toggle Metric via Tab
+                elif key == "\t":
                     current_metric = "coding" if current_metric == "intelligence" else "intelligence"
                     models, frontier_count = build_pareto_model_catalog(current_metric)
                     selected_idx = 0
                     scroll_offset = 0
                     clear_buffer()
+                # Enter: Transition to Providers
                 elif key in ("\r", "\n"):
                     if filtered_models:
                         selected_model_dict = filtered_models[selected_idx]
@@ -350,13 +360,23 @@ def run_tui():
                         provider_selected_idx = 0
                         provider_scroll_offset = 0
                         clear_buffer()
-                elif key in ("\x1b", "\x03"):  # Esc / Ctrl-C
-                    break
-                elif key in ("\x7f", "\x08"):  # Backspace
+                # Esc / Ctrl-C
+                elif key in ("\x1b", "\x03"):
+                    if len(query) > 0:
+                        query = ""  # Esc clears search query first
+                        selected_idx = 0
+                    else:
+                        break
+                # Backspace / Ctrl-H
+                elif key in ("\x7f", "\x08"):
                     if len(query) > 0:
                         query = query[:-1]
                         selected_idx = 0
-                elif len(key) == 1 and 32 <= ord(key) <= 126:  # Printable character
+                # Discard unhandled escape sequences (never let them spill into query)
+                elif key.startswith("\x1b"):
+                    pass
+                # Printable characters -> append to fuzzy search bar
+                elif len(key) == 1 and 32 <= ord(key) <= 126:
                     query += key
                     selected_idx = 0
 
@@ -469,14 +489,20 @@ def run_tui():
 
                 # Input event
                 key = get_key()
-                if key in ("\x1b[A", "\x10"):
+
+                # Up arrow (ANSI, SS3, Ctrl-P)
+                if key in ('\x1b[A', '\x1bOA', '\x10'):
                     provider_selected_idx = max(0, provider_selected_idx - 1)
-                elif key in ("\x1b[B", "\x0e"):
+                # Down arrow (ANSI, SS3, Ctrl-N)
+                elif key in ('\x1b[B', '\x1bOB', '\x0e'):
                     provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 1)
-                elif key in ("\x1b[5~", "\x1b[1;5A"):
+                # Page Up / Ctrl+Up / Shift+Up (jump 5)
+                elif key in ('\x1b[1;5A', '\x1b[1;6A', '\x1b[1;2A', '\x1b[1;3A', '\x1b[1;9A', '\x1b\x1b[A', '\x1b[5~'):
                     provider_selected_idx = max(0, provider_selected_idx - 5)
-                elif key in ("\x1b[6~", "\x1b[1;5B"):
+                # Page Down / Ctrl+Down / Shift+Down (jump 5)
+                elif key in ('\x1b[1;5B', '\x1b[1;6B', '\x1b[1;2B', '\x1b[1;3B', '\x1b[1;9B', '\x1b\x1b[B', '\x1b[6~'):
                     provider_selected_idx = min(len(active_scores) - 1, provider_selected_idx + 5)
+                # Mouse event
                 elif key.startswith("\x1b[<"):
                     try:
                         is_release = key.endswith("m")
@@ -495,21 +521,26 @@ def run_tui():
                                         provider_selected_idx = clicked_idx
                     except Exception:
                         pass
+                # Toggle Quants
                 elif key in ("\t", "a", "A"):
                     filter_all_quants = not filter_all_quants
                     provider_selected_idx = 0
                     provider_scroll_offset = 0
                     clear_buffer()
-                elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D"):
+                # Return to Models
+                elif key in ("\x1b", "\x7f", "\x08", "q", "Q", "\x1b[D", "\x1bOD"):
                     current_view = "MODELS"
                     provider_scores = []
                     clear_buffer()
+                # Enter: Detail Spec Card
                 elif key in ("\r", "\n"):
                     if active_scores:
                         current_view = "DETAIL"
                         clear_buffer()
                 elif key == "\x03":
                     break
+                elif key.startswith("\x1b"):
+                    pass
 
             # ==================================================================
             # VIEW 3: PROVIDER SPEC DETAIL POPUP
