@@ -112,7 +112,7 @@ a five-minute window while the rates summarise a day; the model treats both as
 current.
 
 \subsection{Caller parameters}
-\begin{center}\small
+\begin{center}\footnotesize
 \begin{tabular}{@{}lll@{}}
 \toprule
 Symbol & Meaning & Default \\
@@ -332,10 +332,12 @@ $\sum_{k=1}^{N}\ind[k<N] = N-1$.
 Expanding $\Pi$ separates what the caller pays under a perfect cache from what
 misses and failures add:
 \begin{equation}\label{eq:decomp}
+\begin{split}
   \Pi\, d\, \frac{N(N-1)}{2}
   = \underbrace{r\, d\, \tfrac{N(N-1)}{2}}_{\text{cached-read baseline}}
-  + \underbrace{(1-q)(1-h)(m - r + \rho)\, d\, \tfrac{N(N-1)}{2}}_{\text{miss premium}}
-  + \underbrace{q\,(w_B + \rho_B - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{failure premium}} .
+  &+ \underbrace{(1-q)(1-h)(m - r + \rho)\, d\, \tfrac{N(N-1)}{2}}_{\text{miss premium}} \\
+  &+ \underbrace{q\,(w_B + \rho_B - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{failure premium}} .
+\end{split}
 \end{equation}
 All three are $\Theta(N^2)$: there are $N$ submissions and the $k$-th exposes a
 prefix of $(k-1)d$ tokens, so every per-token surcharge on the prefix is paid on
