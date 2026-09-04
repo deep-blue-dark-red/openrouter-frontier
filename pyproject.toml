@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openrouter-analytics"
+name = "openrouter-frontier"
 version = "0.2.0"
 description = "Inspect OpenRouter 24h provider stats (cache hit rate, latency, throughput, uptime, pricing) and rank providers and models with a cost/utility scoring model and Pareto frontier analysis."
 readme = "README.md"
@@ -20,11 +20,11 @@ dependencies = [
 dev = ["pytest>=7"]
 
 [project.scripts]
-openrouter-analytics = "openrouter_analytics.cli:main"
-or-analytics = "openrouter_analytics.cli:main"
+openrouter-frontier = "openrouter_frontier.cli:main"
+or-frontier = "openrouter_frontier.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["openrouter_analytics"]
+packages = ["openrouter_frontier"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,10 +23,10 @@ import _bootstrap  # noqa: F401
 
 import requests
 
-from openrouter_analytics._util import CACHE_DIR, force_ipv4, load_json_cache, save_json_cache
-from openrouter_analytics.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
-from openrouter_analytics.render import Column, print_table
-from openrouter_analytics.resolver import MODELS_CACHE_FILE, get_all_models
+from openrouter_frontier._util import CACHE_DIR, force_ipv4, load_json_cache, save_json_cache
+from openrouter_frontier.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
+from openrouter_frontier.render import Column, print_table
+from openrouter_frontier.resolver import MODELS_CACHE_FILE, get_all_models
 
 force_ipv4()
 
@@ -41,7 +41,7 @@ METRIC_ALIASES = {
 }
 
 _session = requests.Session()
-_session.headers.update({"User-Agent": "openrouter-analytics-python", "Accept-Encoding": "gzip, deflate"})
+_session.headers.update({"User-Agent": "openrouter-frontier-python", "Accept-Encoding": "gzip, deflate"})
 
 
 def strip_date_suffix(slug: str) -> str:

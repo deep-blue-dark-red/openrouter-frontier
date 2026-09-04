@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, TypeVar
 
-CACHE_DIR = Path.home() / ".cache" / "openrouter_analytics"
+CACHE_DIR = Path.home() / ".cache" / "openrouter_frontier"
 DEFAULT_CACHE_TTL = 300  # seconds
 
 

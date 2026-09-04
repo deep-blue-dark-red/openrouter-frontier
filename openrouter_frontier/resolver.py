@@ -20,7 +20,7 @@ class ModelResolutionError(Exception):
 
 
 def _fetch_models_from_api() -> List[Dict[str, Any]]:
-    resp = requests.get(MODELS_URL, headers={"User-Agent": "openrouter-analytics-python"}, timeout=15)
+    resp = requests.get(MODELS_URL, headers={"User-Agent": "openrouter-frontier-python"}, timeout=15)
     resp.raise_for_status()
     return resp.json().get("data", [])
 
@@ -106,7 +106,7 @@ def resolve_model(query: str) -> Tuple[str, str, str]:
         return _describe(by_short[close[0]])
 
     raise ModelResolutionError(
-        f"Could not resolve model '{query}'. Try 'openrouter-analytics search {query}' to list candidates."
+        f"Could not resolve model '{query}'. Try 'openrouter-frontier search {query}' to list candidates."
     )
 
 

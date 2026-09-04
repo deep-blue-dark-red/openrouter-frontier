@@ -1,6 +1,6 @@
 """Make the repo-root scripts runnable without activating the virtualenv.
 
-Importing this module puts the repository root (so ``openrouter_analytics`` resolves) and the
+Importing this module puts the repository root (so ``openrouter_frontier`` resolves) and the
 local ``.venv`` site-packages on ``sys.path``. Symlinks to the scripts are followed, so a
 symlink placed anywhere on ``$PATH`` still finds the repo.
 """

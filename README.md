@@ -1,31 +1,36 @@
 # OpenRouter Frontier
 
-Python tools for choosing an OpenRouter model and provider on evidence rather than list price.
+**The price of an LLM call is not the list price. It is the expected cost of the turn, and
+that depends on who serves it.** Two providers selling the same model at the same price can
+differ by 2× in what you actually pay, because one hits the prompt cache 88% of the time and the
+other 59%, one fails 3% of requests and throws away your cached prefix, one makes you wait four
+seconds for the first token. Nobody prices that. This does.
 
-The suite pulls OpenRouter's observed 24-hour metrics for every endpoint serving a model
-(prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
-**pricing**) and turns them into two kinds of ranking:
+OpenRouter Frontier pulls the observed 24-hour metrics for every endpoint serving a model —
+prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
+**pricing** — and turns them into a single expected cost per turn, then reasons about it:
 
-- **ProviderUtility scoring** – a formal expected dollar cost of a conversation turn, explicit formula using
-  - provider cache-hit rate
-  - token-generation rate (via your price of hour of time)
-  - provider switch risk (incurring a cache-miss) from uptime.
-  - Bayesian shrinkage for small providers without much history.
-  See (Scoring model)[#Scoring model]Reported per 1M tokens so it sits on the same scale as list prices. 
+- **ProviderUtility scoring** – the expected dollars a conversation turn costs on each endpoint:
+  cache economics with Bayesian shrinkage for low-traffic endpoints, a value-of-time term, and
+  the cost of retrying a failed request. Reported per 1M tokens so it sits on the same scale as
+  list prices, and often reorders them. The full model is in [Scoring model](#scoring-model).
+- **Pareto frontiers** – which providers are non-dominated across cost, latency, throughput,
+  cache hit and uptime at once, and which models no cheaper model out-scores on benchmark
+  quality, with the **efficient point** where marginal quality per dollar starts to fall off.
+- **Routing** – "I need at least this much intelligence": the model and provider to call, chosen
+  from the frontier rather than from a price list.
 
-- **Pareto frontier analysis** – which providers (or models) are not dominated across several
-  objectives at once, so you can see the real trade-offs instead of picking one weight.
-For models, the Pareto frontier quality axis pulls over API Artificial Analysis scores; for the cost axis, token-weighted provider inference cost observed on OpenRouter over last 24 hours. 
-
-Everything is cached on disk under `~/.cache/openrouter_analytics/` (5 minutes for live
-stats, 1 hour for the catalog and benchmarks), so repeat runs are near-instant.
+We also solve the efficient frontier across models, joining OpenRouter's 24-hour realized
+pricing (which changes as providers come and go) with Artificial Analysis benchmark scores, so
+the cost side of "quality per dollar" reflects what the model costs to call today, not its
+list price.
 
 ## Installation
 
 ```bash
 git clone https://github.com/deep-blue-dark-red/openrouter-frontier.git && cd openrouter-frontier
 uv venv && source .venv/bin/activate
-uv pip install -e .            # installs the `openrouter-analytics` / `or-analytics` CLI
+uv pip install -e .            # installs the `openrouter-frontier` / `or-frontier` CLI
 uv pip install -e '.[dev]'     # adds pytest
 ```
 
@@ -42,7 +47,7 @@ The repo-root scripts (`./score_providers.py`, `./openrouter-tui`, …) locate t
 | `model_frontier.py`    | Which models give the most benchmark quality per dollar? Where is the efficient point? |
 | `model_router.py`      | I need at least this much intelligence: which model and provider should I call?        |
 | `get_models.py`        | Search and inspect the 400+ model catalog                                              |
-| `openrouter-analytics` | Rich-coloured CLI: `stats`, `score`, `cache`, `compare`, `search`                      |
+| `openrouter-frontier` | Rich-coloured CLI: `stats`, `score`, `cache`, `compare`, `search`                      |
 
 All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, and
 `glm-5.3-flash` all resolve to `z-ai/glm-5.3-flash`.
@@ -181,7 +186,7 @@ r = route(60, metric="intelligence", mode="efficient")
 r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
 ```
 
-`get_models.py` — catalog search and inspection
+### `get_models.py` — catalog search and inspection
 
 ```bash
 ./get_models.py z-ai/glm-5.3-flash               # detail card: context, pricing, description
@@ -191,14 +196,14 @@ r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
 ./get_models.py --refresh                        # bypass the 1-hour catalog cache
 ```
 
-### `openrouter-analytics` — Rich CLI
+### `openrouter-frontier` — Rich CLI
 
 ```bash
-openrouter-analytics stats   z-ai/glm-5.3-flash --sort cache --top 5   # 24h metrics table
-openrouter-analytics score   z-ai/glm-5.3-flash --time-value 30        # ProviderUtility ranking
-openrouter-analytics cache   z-ai/glm-5.3-flash novita                 # one provider's cache economics
-openrouter-analytics compare z-ai/glm-5.3-flash z-ai novita deepinfra  # side by side
-openrouter-analytics search  glm
+openrouter-frontier stats   z-ai/glm-5.3-flash --sort cache --top 5   # 24h metrics table
+openrouter-frontier score   z-ai/glm-5.3-flash --time-value 30        # ProviderUtility ranking
+openrouter-frontier cache   z-ai/glm-5.3-flash novita                 # one provider's cache economics
+openrouter-frontier compare z-ai/glm-5.3-flash z-ai novita deepinfra  # side by side
+openrouter-frontier search  glm
 ```
 
 `stats --sort` accepts `cache`, `score`, `token_cost`, `latency`, `tps`, `uptime`, `input`,
@@ -282,7 +287,7 @@ marginal quality gained per dollar starts to fall off.
 ## Python API
 
 ```python
-from openrouter_analytics import (
+from openrouter_frontier import (
     ScoringConfig, score_model_providers, get_model_stats,
     Objective, pareto_mask,
 )

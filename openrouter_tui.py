@@ -28,11 +28,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import _bootstrap  # noqa: F401
 
 from model_frontier import build_candidates, load_data
-from openrouter_analytics._util import filter_primary_quantization
-from openrouter_analytics.client import score_model_providers
-from openrouter_analytics.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
-from openrouter_analytics.render import Column, fmt_pct, fmt_seconds, fmt_tps, format_row, header_line
-from openrouter_analytics.scoring import ScoreBreakdown, ScoringConfig
+from openrouter_frontier._util import filter_primary_quantization
+from openrouter_frontier.client import score_model_providers
+from openrouter_frontier.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
+from openrouter_frontier.render import Column, fmt_pct, fmt_seconds, fmt_tps, format_row, header_line
+from openrouter_frontier.scoring import ScoreBreakdown, ScoringConfig
 
 from get_models import clean_str
 

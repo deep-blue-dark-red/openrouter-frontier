@@ -1,6 +1,6 @@
 import math
 
-from openrouter_analytics.scoring import EndpointPricing, ScoringConfig, evaluate_endpoint, shrink_hit_rate
+from openrouter_frontier.scoring import EndpointPricing, ScoringConfig, evaluate_endpoint, shrink_hit_rate
 
 
 def test_shrink_hit_rate_limits():

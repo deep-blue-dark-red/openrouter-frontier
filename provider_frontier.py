@@ -27,12 +27,12 @@ from typing import List, Optional
 
 import _bootstrap  # noqa: F401
 
-from openrouter_analytics._util import filter_primary_quantization, price_per_million
-from openrouter_analytics.client import score_model_providers
-from openrouter_analytics.pareto import Objective, pareto_mask
-from openrouter_analytics.render import Column, fmt_context, fmt_pct, fmt_seconds, fmt_tps, print_table
-from openrouter_analytics.resolver import get_all_models, resolve_model
-from openrouter_analytics.scoring import ScoringConfig
+from openrouter_frontier._util import filter_primary_quantization, price_per_million
+from openrouter_frontier.client import score_model_providers
+from openrouter_frontier.pareto import Objective, pareto_mask
+from openrouter_frontier.render import Column, fmt_context, fmt_pct, fmt_seconds, fmt_tps, print_table
+from openrouter_frontier.resolver import get_all_models, resolve_model
+from openrouter_frontier.scoring import ScoringConfig
 
 OPTIMAL = "★ OPTIMAL"
 DOMINATED = "Dominated"

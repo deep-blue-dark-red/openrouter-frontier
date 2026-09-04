@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from openrouter_analytics.pareto import Objective, annotate_frontier, cost_quality_frontier, pareto_mask
+from openrouter_frontier.pareto import Objective, annotate_frontier, cost_quality_frontier, pareto_mask
 
 
 @dataclass

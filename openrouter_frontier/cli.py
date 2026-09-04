@@ -1,4 +1,4 @@
-"""Rich-formatted ``openrouter-analytics`` command-line interface."""
+"""Rich-formatted ``openrouter-frontier`` command-line interface."""
 
 import json
 from typing import List, Optional
@@ -55,7 +55,7 @@ def _fail(msg: str) -> None:
 @click.group()
 @click.version_option(version=__version__)
 def main():
-    """OpenRouter Analytics: 24h provider stats, cache hit rates, pricing, and utility scores."""
+    """OpenRouter Frontier: 24h provider stats, cache hit rates, pricing, and utility scores."""
 
 
 @main.command(name="stats")

@@ -1,8 +1,8 @@
-"""OpenRouter Analytics: 24h provider stats, cache hit rates, pricing, and cost/utility scoring."""
+"""OpenRouter Frontier: 24h provider stats, cache hit rates, pricing, and cost/utility scoring."""
 
 from .client import (
     OpenRouterAnalytics,
-    OpenRouterAnalyticsError,
+    OpenRouterFrontierError,
     get_cache_hit_rate,
     get_model_stats,
     score_model_providers,
@@ -15,7 +15,7 @@ from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_en
 __version__ = "0.2.0"
 __all__ = [
     "OpenRouterAnalytics",
-    "OpenRouterAnalyticsError",
+    "OpenRouterFrontierError",
     "get_model_stats",
     "get_cache_hit_rate",
     "score_model_providers",

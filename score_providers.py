@@ -13,11 +13,11 @@ from typing import List, Optional
 
 import _bootstrap  # noqa: F401  (makes the local package and .venv importable)
 
-from openrouter_analytics._util import filter_primary_quantization
-from openrouter_analytics.client import score_model_providers
-from openrouter_analytics.render import Column, fmt_pct, fmt_seconds, fmt_tps, print_table
-from openrouter_analytics.resolver import resolve_model
-from openrouter_analytics.scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
+from openrouter_frontier._util import filter_primary_quantization
+from openrouter_frontier.client import score_model_providers
+from openrouter_frontier.render import Column, fmt_pct, fmt_seconds, fmt_tps, print_table
+from openrouter_frontier.resolver import resolve_model
+from openrouter_frontier.scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
 
 
 def evaluate_provider_utility(

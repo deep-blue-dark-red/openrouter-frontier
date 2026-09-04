@@ -20,7 +20,7 @@ _RSC_STATS_RE = re.compile(r'"stats":(\{[^}]+\})')
 _RSC_UPTIME_RE = re.compile(r'"([a-f0-9\-]{36})":\[(\{"date":[^\]]+\})\]')
 
 
-class OpenRouterAnalyticsError(Exception):
+class OpenRouterFrontierError(Exception):
     """Raised when OpenRouter data cannot be fetched."""
 
 
@@ -176,7 +176,7 @@ class OpenRouterAnalytics:
             try:
                 eff = fut_eff.result()
             except Exception as e:
-                raise OpenRouterAnalyticsError(f"Failed to fetch stats for '{model}' ({canonical_slug}): {e}")
+                raise OpenRouterFrontierError(f"Failed to fetch stats for '{model}' ({canonical_slug}): {e}")
             stats_map, uptime_map = fut_perf.result()
             pricing_map, quant_map = fut_price.result()
 
@@ -256,7 +256,7 @@ class OpenRouterAnalytics:
     ) -> Dict[str, Any]:
         """Query private account analytics. Requires a management API key."""
         if not self.management_key:
-            raise OpenRouterAnalyticsError("A management API key is required for account analytics.")
+            raise OpenRouterFrontierError("A management API key is required for account analytics.")
 
         filters = []
         if model:

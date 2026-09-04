@@ -20,9 +20,9 @@ from typing import Any, Dict, List, Tuple
 
 import _bootstrap  # noqa: F401
 
-from openrouter_analytics._util import price_per_million
-from openrouter_analytics.render import Column, fmt_context, print_table
-from openrouter_analytics.resolver import get_all_models
+from openrouter_frontier._util import price_per_million
+from openrouter_frontier.render import Column, fmt_context, print_table
+from openrouter_frontier.resolver import get_all_models
 
 
 def clean_str(s: str) -> str:
