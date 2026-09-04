@@ -35,8 +35,6 @@ def evaluate_provider_utility(
     completion_tokens: int = 500,
     time_value_usd_per_hour: float = 0.0,
     price_failures: bool = True,
-    prior: float = 0.5,
-    prior_weight_tokens: float = 1e9,
     provider_name: str = "Unknown",
     provider_slug: str = "unknown",
 ) -> ScoreBreakdown:
@@ -56,13 +54,10 @@ def evaluate_provider_utility(
         completion_tokens=completion_tokens,
         time_value_usd_per_hour=time_value_usd_per_hour,
         price_failures=price_failures,
-        prior=prior,
-        prior_weight_tokens=prior_weight_tokens,
     )
     return evaluate_endpoint(
         pricing=pricing,
         cache_hit_rate=cache_hit_rate,
-        total_tokens=total_tokens_served,
         ttft_seconds=ttft_seconds,
         throughput_tps=throughput_tps,
         uptime_pct=uptime_pct,
@@ -81,7 +76,6 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         cols.append(Column("Fail $/M", 10, ">"))
     cols += [
         Column("CacheHit", 8, ">"),
-        Column("h(pub)", 7, ">"),
         Column("Hit $/M", 8, ">"),
         Column("Miss $/M", 9, ">"),
         Column("Latency", 8, ">"),
@@ -97,8 +91,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         if cfg.price_failures:
             row.append(r.formatted_failure_cost)
         row += [
-            r.formatted_h_used,
-            r.formatted_h_raw,
+            r.formatted_cache_hit_rate,
             f"${r.hit_price:.4f}",
             f"${r.miss_price:.4f}",
             fmt_seconds(r.ttft_seconds),
@@ -115,11 +108,10 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         subtitle_lines=[
             f"Mode: {mode}  •  Turn: {cfg.prompt_tokens} prompt + {cfg.completion_tokens} completion tokens"
             f"  •  Time Value: ${cfg.time_value_usd_per_hour:.2f}/hr",
-            f"Shrinkage: prior={cfg.prior * 100:.0f}%, weight={cfg.prior_weight_tokens / 1e9:.1f}B tokens"
-            f"  •  Discounts: {'Applied' if cfg.apply_discount else 'List Price'}"
+            f"Discounts: {'Applied' if cfg.apply_discount else 'List Price'}"
             f"  •  Failure Risk: {'Yes' if cfg.price_failures else 'No'}  •  {quant_desc}",
         ],
-        footer="Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.",
+        footer="Lower Scored $/M is better. CacheHit is the published 24h token-weighted cache hit rate.",
     )
 
 
@@ -133,8 +125,6 @@ def main() -> None:
     parser.add_argument("-o", "--completion-tokens", type=int, default=500, help="Completion tokens per turn (O)")
     parser.add_argument("-t", "--time-value", type=float, default=0.0, help="Time value in USD/hr (0 = pure token cost)")
     parser.add_argument("--no-failures", action="store_true", help="Disable uptime failure-risk pricing")
-    parser.add_argument("--prior", type=float, default=0.5, help="Bayesian shrinkage prior hit rate (0..1)")
-    parser.add_argument("--prior-weight", type=float, default=1e9, help="Bayesian prior weight in tokens (W)")
     parser.add_argument("--no-discount", action="store_true", help="Use list pricing, ignoring endpoint discounts")
     parser.add_argument("--all-quants", action="store_true", help="Include all quantizations (default: primary fp8 variant only)")
     parser.add_argument("-n", "--top", type=int, default=10, help="Number of providers to display")
@@ -147,8 +137,6 @@ def main() -> None:
         completion_tokens=args.completion_tokens,
         time_value_usd_per_hour=args.time_value,
         price_failures=not args.no_failures,
-        prior=args.prior,
-        prior_weight_tokens=args.prior_weight,
         apply_discount=not args.no_discount,
     )
 

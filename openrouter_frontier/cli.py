@@ -153,8 +153,6 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
 @click.option("--completion-tokens", "-o", default=500, type=int, show_default=True, help="Completion tokens per turn (O).")
 @click.option("--time-value", "-t", default=0.0, type=float, show_default=True, help="Time value in USD/hr; 0 = pure token cost.")
 @click.option("--price-failures/--no-failures", default=True, help="Include failure risk cost from endpoint uptime.")
-@click.option("--prior", default=0.5, type=float, show_default=True, help="Prior cache hit rate for shrinkage.")
-@click.option("--prior-weight", "-w", default=1e9, type=float, show_default=True, help="Prior weight in tokens (W).")
 @click.option("--discount/--no-discount", default=True, help="Apply advertised endpoint discounts.")
 @click.option("--all-quants", is_flag=True, help="Include every quantization variant, not just the primary (fp8).")
 @click.option("--provider", "-p", default=None, help="Filter to a specific provider.")
@@ -166,8 +164,6 @@ def score_command(
     completion_tokens: int,
     time_value: float,
     price_failures: bool,
-    prior: float,
-    prior_weight: float,
     discount: bool,
     all_quants: bool,
     provider: Optional[str],
@@ -180,8 +176,6 @@ def score_command(
         completion_tokens=completion_tokens,
         time_value_usd_per_hour=time_value,
         price_failures=price_failures,
-        prior=prior,
-        prior_weight_tokens=prior_weight,
         apply_discount=discount,
     )
 
@@ -210,7 +204,6 @@ def score_command(
         Panel.fit(
             f"Model: [bold cyan]{model}[/bold cyan] | Turn: [bold]{prompt_tokens}[/bold] prompt + [bold]{completion_tokens}[/bold] completion tokens\n"
             f"Mode: [bold yellow]{mode}[/bold yellow] | Time Value: [bold]${time_value:.2f}/hr[/bold] | Failure Risk: [bold]{'Yes' if price_failures else 'No'}[/bold]\n"
-            f"Shrinkage: prior=[bold]{prior * 100:.0f}%[/bold], weight=[bold]{prior_weight / 1e9:.1f}B[/bold] tokens | "
             f"Discounts: [bold]{'Applied' if discount else 'List Price'}[/bold] | Quants: [bold]{'All' if all_quants else 'Primary'}[/bold]",
             title="ProviderScore Evaluation & Cost per 1M tok",
             border_style="magenta",
@@ -226,7 +219,6 @@ def score_command(
     if price_failures:
         table.add_column("Fail $/M", justify="right")
     table.add_column("CacheHit", justify="right")
-    table.add_column("h (pub)", justify="right", style="dim")
     for col in ("Hit $/M", "Miss $/M", "Latency", "TPS", "Uptime"):
         table.add_column(col, justify="right")
 
@@ -237,8 +229,7 @@ def score_command(
         if price_failures:
             row.append(s.formatted_failure_cost)
         row += [
-            _color_hit_rate(s.h_used * 100.0),
-            s.formatted_h_raw,
+            _color_hit_rate(s.cache_hit_rate * 100.0),
             f"${s.hit_price:.4f}",
             f"${s.miss_price:.4f}",
             fmt_seconds(s.ttft_seconds),
@@ -248,7 +239,7 @@ def score_command(
         table.add_row(*row)
 
     console.print(table)
-    console.print("[dim]Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h (pub) is the published 24h rate.[/dim]\n")
+    console.print("[dim]Lower Scored $/M is better. CacheHit is the published 24h token-weighted cache hit rate.[/dim]\n")
 
 
 @main.command(name="cache")
@@ -302,7 +293,6 @@ def cache_command(model: str, provider: Optional[str], prompt_tokens: int, compl
     console.print(f"[bold cyan]Provider:[/bold cyan] {p.name} ({p.slug}, {p.quantization})")
     console.print(f"[bold cyan]24h Published Cache Hit:[/bold cyan] {_color_hit_rate(p.cache_hit_rate_pct)}")
     if score:
-        console.print(f"[bold cyan]Shrunk Hit Rate (h_used):[/bold cyan] {_color_hit_rate(score.h_used * 100.0)}")
         console.print(
             f"[bold cyan]Expected Token Cost (per 1M tok):[/bold cyan] [bold green]{score.formatted_token_cost}[/bold green] "
             f"({prompt_tokens} prompt + {completion_tokens} completion)"
@@ -344,7 +334,7 @@ def compare_command(model: str, providers: List[str], prompt_tokens: int, comple
     )
     table.add_column("Provider", style="bold white", no_wrap=True)
     table.add_column("Scored $/M", justify="right", style="bold green")
-    for col in ("CacheHit", "h (pub)", "Latency", "TPS", "Uptime", "Tokens (24h)", "Share"):
+    for col in ("CacheHit", "Latency", "TPS", "Uptime", "Tokens (24h)", "Share"):
         table.add_column(col, justify="right")
 
     for p in selected:
@@ -352,7 +342,6 @@ def compare_command(model: str, providers: List[str], prompt_tokens: int, comple
         table.add_row(
             p.name,
             sb.formatted_total_cost if sb else "--",
-            _color_hit_rate(sb.h_used * 100.0) if sb else Text("--", style="dim"),
             _color_hit_rate(p.cache_hit_rate_pct),
             _color_latency(p.latency_p50_ms, p.formatted_latency),
             _color_tps(p.throughput_p50_tps, p.formatted_tps),

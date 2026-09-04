@@ -1,0 +1,407 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Prob}{\Pr}
+\newcommand{\ind}{\mathbf{1}}
+
+\title{A Task-Level Cost Model for LLM Endpoint Selection\\
+\large with prompt caching, failures, time value, and uncertainty penalties}
+\author{Matthew Pollard}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The price of a language-model call is not its list price. Over a multi-turn task
+the transcript is resubmitted at every turn, so the caller pays for a growing
+prefix $N$ times. Whether that prefix is served from a prompt cache, whether the
+request fails and must be retried cold, and how long the caller waits all change
+the bill, and all three differ between providers serving the same model. This
+document defines the cost of a \emph{task} as the sum of its turn costs, derives
+its expectation and a variance bound in closed form, and treats OpenRouter's
+published 24-hour rates as measured inputs rather than parameters to be estimated.
+All quantities map to fields published by OpenRouter or to explicit caller
+assumptions.
+\end{abstract}
+
+\section{Setup}
+
+\subsection{Task profile}
+
+A task is a sequence of $N$ turns indexed $k = 1, \dots, N$. At each turn the
+caller appends $a$ new prompt tokens (user text or tool results) and the model
+emits $o$ completion tokens. The transcript therefore grows by
+\[
+  d = a + o
+\]
+tokens per turn. At turn $k$ the prompt is the full transcript so far. It
+consists of a \emph{reusable prefix} that was already sent on the previous turn,
+\[
+  S_k = (k-1)\,d, \qquad k = 1,\dots,N,
+\]
+followed by the $a$ new tokens, which no cache can have seen. The total prompt at
+turn $k$ is $S_k + a$. Inter-turn gaps are assumed short relative to cache
+retention; see Section~\ref{sec:beyond} for the relaxation.
+
+\subsection{Endpoint prices}
+
+An endpoint $e$ publishes per-token prices, in USD per token (the tools display
+them per million):
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Meaning & OpenRouter field \\
+\midrule
+$w_e$ & uncached prompt token & \texttt{input\_cache\_write} if published, else \texttt{prompt} \\
+$r_e$ & cached prompt token & \texttt{input\_cache\_read} \\
+$c_e$ & completion token & \texttt{completion} \\
+$f_e$ & fixed fee per request (USD) & \texttt{request} \\
+\bottomrule
+\end{tabular}
+\end{center}
+If \texttt{input\_cache\_read} is absent the endpoint has no cache and we set
+$r_e = w_e$ and $h_e = 0$ below. Prices from the endpoints API are already net of
+any advertised discount; the \texttt{discount} field is informational.
+
+\subsection{Endpoint telemetry}
+
+For each endpoint OpenRouter publishes 24-hour aggregates:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Meaning & Source \\
+\midrule
+$h_e \in [0,1]$ & token-weighted prompt cache hit rate & \texttt{cacheHitRate} \\
+$T_e$ & tokens served in the window & \texttt{totalTokens} \\
+$u_e \in [0,1]$ & uptime (fraction of successful requests) & \texttt{uptime\_last\_1d} \\
+$\ell_e^{50}, \ell_e^{90}$ & p50 / p90 time to first token (s) & \texttt{p50\_latency}, \texttt{p90\_latency} \\
+$g_e^{50}, g_e^{90}$ & p50 / p90 output throughput (tokens/s) & \texttt{p50\_throughput}, \texttt{p90\_throughput} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Caller parameters}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Meaning & Default \\
+\midrule
+$N, a, o$ & task profile & profile-dependent \\
+$v$ & value of the caller's time, USD per hour & $0$ \\
+$\kappa_\ell$ & latency pessimism, blend toward p90 & $0$ \\
+$\lambda$ & risk aversion, in task standard deviations & $0$ \\
+$B$ & fallback endpoint on failure & the endpoint itself, cold \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Assumptions}
+
+\begin{assumption}[Independent cache outcomes]\label{as:indep}
+Let $H_k \in [0,1]$ be the fraction of the reusable prefix $S_k$ served from cache
+at turn $k$. The $H_k$ are independent across turns with common mean
+$\E[H_k] = h$, the endpoint's published hit rate.
+\end{assumption}
+
+The Bernoulli case, $H_k \in \{0,1\}$ with $\Prob[H_k = 0] = p = 1 - h$, is the
+special case in which every turn is a complete hit or a complete miss. The
+published $h$ is token-weighted and identifies the mean of $H_k$ but not its
+distribution; the Bernoulli model is the maximum-variance member of the family,
+which is used in Section~\ref{sec:var}.
+
+\begin{assumption}[Independent failures]\label{as:fail}
+Each request fails with probability $q = 1 - u$, independently of everything
+else. A failed request is not billed for tokens. It is retried once on the
+fallback endpoint $B$, which succeeds and has no cached prefix for this task.
+\end{assumption}
+
+\begin{assumption}[Time is linear in tokens]\label{as:time}
+Waiting for the first token costs $\ell$ seconds and generating $o$ tokens
+costs $o / g$ seconds. Both are valued at $v$ USD per hour. Time to first token
+is treated as independent of prompt length because OpenRouter publishes only a
+single p50 per endpoint.
+\end{assumption}
+
+\begin{assumption}[Missing telemetry is worst-case]\label{as:missing}
+If an endpoint lacks a latency, throughput, or uptime observation, the missing
+value is imputed as the worst observed value among endpoints serving the same
+model. An endpoint is never made cheaper by having less data.
+\end{assumption}
+
+\section{Inputs are measurements, not estimates}\label{sec:inputs}
+
+The hit rate $h$ and uptime $u$ enter the model exactly as OpenRouter publishes
+them. Each is a token- or request-weighted average over every call the endpoint
+served in the last 24 hours. For GLM 5.3 Flash on 2026-09-04 the smallest primary
+endpoint served $3 \times 10^8$ tokens and the largest $4 \times 10^{10}$; even
+at $10^4$ tokens per request that is tens of thousands to millions of requests,
+and the sampling standard deviation of a proportion at those counts is below
+$0.3$ percentage points. No shrinkage toward a prior is applied: any prior heavy
+enough to move the estimate would dwarf the sampling noise and merely penalise
+smaller providers for being smaller.
+
+Two sources of uncertainty remain and are outside the model. The 24-hour window
+moves, so the published rate drifts from day to day; a penalty for that should be
+derived from the observed temporal variance of the rate, which requires recording
+history. And the aggregate describes other callers' traffic, not the caller's own
+task; the right instrument for that is an explicit override of $h$ (for example
+$h = 0$ for a cold-cache bound), not a prior.
+
+\subsection{Latency}
+
+OpenRouter publishes p50 and p90 time to first token. A pessimistic latency is a
+blend toward the tail,
+\begin{equation}\label{eq:pess-l}
+  \ell = (1 - \kappa_\ell)\, \ell^{50} + \kappa_\ell\, \ell^{90},
+  \qquad \kappa_\ell \in [0, 1],
+\end{equation}
+and throughput uses the median, $g = g^{50}$, since the published p90 is the
+favourable tail. If \texttt{input\_cache\_read} is absent the endpoint has no
+cache and $h = 0$; if no hit rate is published for a cacheable endpoint it is
+scored as cold, $h = 0$, consistent with Assumption~\ref{as:missing}.
+
+\section{Turn cost}
+
+Fix an endpoint $A$ with inputs $h, u, \ell, g$ and prices $w, r, c, f$. Write $v' = v / 3600$ for the value of one
+second.
+
+\subsection{Successful turn}
+
+The $a$ new tokens are always billed at $w$. The prefix $S_k$ is billed at $r$
+for the cached fraction and $w$ for the rest:
+\begin{equation}\label{eq:turn-ok}
+  X_k^{\text{ok}}
+  = \underbrace{w\,a + c\,o + f}_{\text{fixed}}
+  + \underbrace{v'\big(\ell + o / g\big)}_{\text{time}}
+  + \underbrace{S_k\,\big[\, w - H_k\,(w - r)\,\big]}_{\text{prefix}} .
+\end{equation}
+Taking expectations under Assumption~\ref{as:indep},
+\begin{equation}\label{eq:turn-ok-mean}
+  \E\big[X_k^{\text{ok}}\big] = \alpha + \pi\, S_k,
+  \qquad
+  \alpha = w\,a + c\,o + f + v'\big(\ell + o/g\big),
+  \qquad
+  \pi = h\, r + (1 - h)\, w .
+\end{equation}
+$\pi$ is the \emph{effective prefix price}. The new tokens never receive it.
+
+\subsection{Failed turn}
+
+With probability $q$ the request to $A$ fails. The caller has waited
+$\ell_A$ seconds for nothing, then repeats the turn on the fallback
+$B$, whose cache holds none of this task's prefix. The retried turn costs
+\begin{equation}\label{eq:turn-fail}
+  X_k^{\text{fail}}
+  = v' \ell_A
+  + \underbrace{w_B\,(S_k + a) + c_B\, o + f_B + v'\big(\ell_B + o / g_B\big)}_{\text{cold turn on } B}
+  + \underbrace{h\,(w - r)\, d}_{\text{return penalty}} .
+\end{equation}
+The return penalty is the expected extra cost at turn $k+1$: $A$'s cache
+never saw turn $k$'s completion, so of the prefix $S_{k+1}$ only $S_k$ can be
+cached and the remaining $d$ tokens are billed at $w$ rather than at the
+blended price. Writing $\alpha_B = w_B\, a + c_B\, o + f_B + v'(\ell_B
++ o / g_B)$,
+\begin{equation}\label{eq:turn-fail-mean}
+  \E\big[X_k^{\text{fail}}\big] = \beta + w_B\, S_k,
+  \qquad
+  \beta = v' \ell_A + \alpha_B + h\,(w - r)\, d .
+\end{equation}
+When $B = A$ (the default: the endpoint retried cold) this reduces to the
+prefix loss $h\,(w - r)\,S_k$ plus one wasted wait, which is the
+failure term in the current scorer, plus the retry's own time.
+
+\subsection{Expected turn cost}
+
+Combining \eqref{eq:turn-ok-mean} and \eqref{eq:turn-fail-mean},
+\begin{equation}\label{eq:turn-mean}
+  \E[X_k] = (1 - q)\,(\alpha + \pi\, S_k) + q\,(\beta + w_B\, S_k)
+  = \underbrace{(1-q)\,\alpha + q\,\beta}_{A_0}
+  + \underbrace{\big[(1-q)\,\pi + q\, w_B\big]}_{\Pi}\, S_k .
+\end{equation}
+The turn cost is affine in the prefix length with intercept $A_0$ and slope
+$\Pi$, the failure-adjusted effective prefix price.
+
+\section{Task cost}
+
+\begin{proposition}[Task cost]\label{prop:task}
+The task cost is the sum of the turn costs, $X_{\text{task}} = \sum_{k=1}^N X_k$.
+Under Assumptions~\ref{as:indep}--\ref{as:time} and constant growth
+$S_k = (k-1)d$,
+\begin{equation}\label{eq:task-mean}
+  \boxed{\;
+  \E[X_{\text{task}}]
+  = N\, A_0 \;+\; \Pi\, d\, \frac{N(N-1)}{2}
+  \;}
+\end{equation}
+\end{proposition}
+\begin{proof}
+Sum \eqref{eq:turn-mean} over $k$ and use $\sum_{k=1}^{N} (k-1) = N(N-1)/2$.
+\end{proof}
+
+\subsection{Decomposition}
+
+Expanding $\Pi$ separates what the caller pays under a perfect cache from what
+misses and failures add:
+\begin{equation}\label{eq:decomp}
+  \Pi\, d\, \frac{N(N-1)}{2}
+  = \underbrace{r\, d\, \tfrac{N(N-1)}{2}}_{\text{cached-read baseline}}
+  + \underbrace{(1-q)\,(1-h)\,(w - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{miss premium}}
+  + \underbrace{q\,(w_B - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{failure premium}} .
+\end{equation}
+All three terms are $\Theta(N^2)$. There are $N$ submissions and the $k$-th
+exposes a prefix of length $(k-1)d$, so every per-token surcharge on the
+prefix is paid on a quadratically growing volume. A hit rate of $95\%$ is
+therefore not a $5\%$ surcharge on a long task: the miss premium is
+$\Theta((1 - h)\, N^2)$ while the linear term $N A_0$ does not grow with
+context at all.
+
+\begin{remark}[Mean-prefix equivalence]
+Because \eqref{eq:turn-mean} is affine in $S_k$,
+\[
+  \E[X_{\text{task}}] = N \cdot \E\big[X_k \,\big|\, S_k = \bar S\big],
+  \qquad \bar S = d\, \frac{N-1}{2}.
+\]
+The task equals $N$ representative turns at the mean prefix, not one. The
+factor $N$ does not affect the ranking of endpoints but does affect totals.
+\end{remark}
+
+\begin{remark}[Relation to the single-turn scorer]
+The current scorer takes one prompt size $C$ and applies $\pi$ to all of it.
+That treats the new tokens as partly cached and underprices each turn by
+$h\,(w - r)\, a$. It also reports one turn, not $N$. Replacing $C$ by
+the pair $(a, S_k)$ and summing over $k$ recovers \eqref{eq:task-mean}.
+\end{remark}
+
+\subsection{Comparing endpoints}
+
+For endpoints $A$ and $A'$ serving the same model,
+\begin{equation}\label{eq:compare}
+  \E[X^{A}_{\text{task}}] - \E[X^{A'}_{\text{task}}]
+  = N\,\big(A_0 - A_0'\big) + \big(\Pi - \Pi'\big)\, d\, \frac{N(N-1)}{2}.
+\end{equation}
+When list prices coincide, as they do for every primary endpoint of many
+open-weight models, the first term vanishes and the gap is purely quadratic
+and driven by $h$ and $u$ alone.
+
+\section{Variance and risk}\label{sec:var}
+
+Under Assumption~\ref{as:indep} and ignoring the randomness of failures, the
+only random terms are $H_k$, and
+\begin{equation}\label{eq:var}
+  \Var[X_{\text{task}}]
+  = (w - r)^2\, d^2 \sum_{k=1}^{N} (k-1)^2\, \Var[H_k]
+  \;\le\; (w - r)^2\, h\,(1 - h)\, d^2\, \frac{(N-1)\,N\,(2N-1)}{6}.
+\end{equation}
+The bound is attained by the Bernoulli model and is the largest variance of any
+$[0,1]$-valued $H_k$ with mean $h$. The standard deviation grows as
+$N^{3/2}$; the coefficient of variation shrinks as $N^{-1/2}$. The published
+$h$ alone gives an upper bound on tail risk, not an estimate of it. The single
+worst event is a full miss on the last turn, costing $(w - r)\, d\, (N-1)$.
+
+Including failures, $X_k$ is a mixture of two affine functions of $S_k$ and
+its variance adds $q(1-q)\big[(\beta - \alpha) + (w_B - \pi) S_k\big]^2$ per
+turn; the closed form is routine and omitted.
+
+\subsection{Decision rule}
+
+Given a quality constraint $Q_m \ge q_{\min}$ on the model $m$ served, choose
+\begin{equation}\label{eq:decision}
+  \min_{(m, e)} \;\; \E\big[X_{\text{task}}(m, e)\big] + \lambda\, \sqrt{\Var\big[X_{\text{task}}(m, e)\big]}
+  \quad \text{s.t.} \quad Q_m \ge q_{\min},
+\end{equation}
+with $\lambda = 0$ for a risk-neutral caller. The Pareto tools report the
+non-dominated set over the objectives
+\[
+  \big(\E[X_{\text{task}}] \downarrow,\ \ell \downarrow,\ g \uparrow,\ h \uparrow,\ u \uparrow\big)
+\]
+so that a caller who will not commit to $v$ and $\lambda$ can still see the
+trade-offs.
+
+\section{Worked example}
+
+GLM 5.3 Flash, primary endpoints, 2026-09-04. Every endpoint lists
+$w = 0.075$, $r = 0.015$, $c = 0.25$ USD per million tokens, so only telemetry
+separates them. Task profile $a = 2000$, $o = 500$, $N = 200$, $v = 0$, $B = A$.
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Endpoint & $h$ & $u$ & $\Pi$ (\$/M) & $\E[X_{\text{task}}]$ \\
+\midrule
+Z.ai      & 0.859 & 0.998 & 0.0236 & \$1.23 \\
+DeepInfra & 0.497 & 0.993 & 0.0454 & \$2.31 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With $\sum_k S_k = d\,N(N-1)/2 = 49.75$M prefix tokens, the quadratic term is
+\$1.17 on Z.ai and \$2.26 on DeepInfra, against a linear term of \$0.055 on
+both. At the default single turn of the current tools the same two endpoints
+differ by $25\%$; over the task they differ by $88\%$, and all of it comes from
+the hit rate. The Bernoulli variance bound \eqref{eq:var} gives a standard
+deviation of \$0.085 on Z.ai and \$0.122 on DeepInfra, so at $N = 200$ the two
+endpoints are separated by roughly nine standard deviations of the noisier one.
+
+\section{Beyond independent misses}\label{sec:beyond}
+
+Assumption~\ref{as:indep} is the weakest link. Three refinements are stated as
+explicit knobs because OpenRouter's data cannot identify them.
+
+\paragraph{Eviction.}
+Caches expire after a time-to-live $T_{\text{ttl}}$. With inter-turn gap
+$\tau_k$, replace the constant hit rate by
+$h_k = h \cdot \ind[\tau_k < T_{\text{ttl}}]$ or by
+$h_k = h\, e^{-\tau_k / T_{\text{ttl}}}$. Tool-call bursts then hit and
+human think-time misses.
+
+\paragraph{Cache cap.}
+If a provider caches at most $L$ tokens, the cached part of the prefix is
+$\min(S_k, L)$ and the remainder is billed at $w$. Whether exceeding the cap
+instead invalidates the whole prefix is provider-specific and should be a
+switch, not an assumption.
+
+\paragraph{Provider state.}
+Let $Z_k$ be the endpoint serving turn $k$ under the routing policy and
+failures, and give each endpoint its own cache state (longest held prefix and
+time last touched). Turn $k$ hits on $Z_k$ only if that endpoint holds the
+current prefix within its TTL. A return to $A$ after a detour to $B$ hits if
+$A$'s copy is still alive. This is a Markov chain over (endpoint, cache
+state); the independent model is its memoryless approximation.
+
+\paragraph{Compounding.}
+If a disruption at turn $t_j$ leaves the task cold for $R_j$ turns, the
+premium is $(w - r) \sum_j \sum_{k = t_j}^{t_j + R_j - 1} S_k$. With fixed
+$R_j$ this is still $O(N^2)$; if recovery scales with task length it is
+$O(N^3)$; if a switch permanently loses affinity it is a regime change and the
+cold cost applies from then on.
+
+\section{Reporting}
+
+The unit of optimisation is the task. For each endpoint the tools should report
+\begin{itemize}
+  \item $\E[X_{\text{task}}]$ in dollars per completed task, with the
+        decomposition \eqref{eq:decomp}: fixed, time, cached-read baseline,
+        miss premium, failure premium;
+  \item the perfect-cache cost ($h = 1$) and cold-cache cost
+        ($h = 0$) as bounds;
+  \item the variance bound \eqref{eq:var} and the risk-adjusted objective
+        \eqref{eq:decision};
+  \item total fresh, cached-read, and completion tokens;
+  \item the telemetry inputs $h, u, \ell, g$ and the timestamp of the
+        24-hour window they summarise.
+\end{itemize}
+Per-million normalisation is secondary: repeatedly submitted transcript tokens
+make the denominator ambiguous, and the figure falls with context while the
+bill rises.
+
+\end{document}

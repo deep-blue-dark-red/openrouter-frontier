@@ -302,7 +302,7 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
             line = format_row(
                 [
                     s.provider_name[:16], s.formatted_total_cost, s.formatted_token_cost, s.formatted_failure_cost,
-                    s.formatted_h_used, fmt_seconds(s.ttft_seconds), fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct),
+                    s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds), fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct),
                     f"${s.hit_price:.4f}", f"${s.miss_price:.4f}",
                 ],
                 PROVIDER_COLS,
@@ -330,7 +330,7 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     write(f"  Token Cost (per 1M tok):    {s.formatted_token_cost}")
     write(f"  Failure Risk (per 1M tok):  {s.formatted_failure_cost}")
     write(f"  Time Cost (per 1M tok):     {s.formatted_time_cost}")
-    write(f"  Prompt Cache Hit Rate:      used {BOLD}{s.formatted_h_used}{RESET}  (published 24h: {s.formatted_h_raw})")
+    write(f"  Prompt Cache Hit Rate (24h): {BOLD}{s.formatted_cache_hit_rate}{RESET}")
     write(f"  Cache Read (Hit) Price:     ${s.hit_price:.4f} per 1M tok")
     write(f"  Cache Write/Miss Price:     ${s.miss_price:.4f} per 1M tok")
     write(f"  Completion Price:           ${s.out_price:.4f} per 1M tok")

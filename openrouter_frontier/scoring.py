@@ -1,12 +1,12 @@
 """ProviderScore scoring model: expected cost per conversation turn for one endpoint.
 
-    tokenCost   = [ C·(h_used·hitPrice + (1 − h_used)·missPrice) + O·out ] / 1e6 + requestFee
+    tokenCost   = [ C·(h·hitPrice + (1 − h)·missPrice) + O·out ] / 1e6 + requestFee
     timeCost    = (timeValue$/hr / 3600) · (ttft + O / throughput)
-    failureCost = (1 − uptime) · [ C·h_used·(missPrice − hitPrice) / 1e6 + (timeValue$/hr / 3600)·ttft ]
+    failureCost = (1 − uptime) · [ C·h·(missPrice − hitPrice) / 1e6 + (timeValue$/hr / 3600)·ttft ]
     totalCost   = tokenCost + timeCost + failureCost
 
-where ``C`` is prompt tokens per turn, ``O`` completion tokens per turn, and ``h_used`` the
-Bayesian-shrunk cache hit rate ``(h·T + prior·W) / (T + W)``.
+where ``C`` is prompt tokens per turn, ``O`` completion tokens per turn, and ``h`` the
+endpoint's published 24-hour token-weighted cache hit rate, used as observed.
 """
 
 from dataclasses import dataclass
@@ -23,9 +23,6 @@ class ScoringConfig:
     :param completion_tokens: Completion tokens per turn (O).
     :param time_value_usd_per_hour: Opportunity cost of wall-clock time. 0 disables timeCost.
     :param price_failures: Charge for expected retries using the endpoint's 24h uptime.
-    :param prior: Prior belief for the cache hit rate before observing traffic.
-    :param prior_weight_tokens: Pseudo-count W (in tokens) behind the prior. Endpoints that
-                                served fewer than W tokens are pulled toward the prior.
     :param apply_discount: Apply the endpoint's advertised discount to all prices.
     """
 
@@ -33,8 +30,6 @@ class ScoringConfig:
     completion_tokens: int = 500
     time_value_usd_per_hour: float = 0.0
     price_failures: bool = True
-    prior: float = 0.5
-    prior_weight_tokens: float = 1e9
     apply_discount: bool = True
 
     @property
@@ -88,8 +83,7 @@ class ScoreBreakdown:
 
     hit_price: float   # $/M charged for cached prompt tokens
     miss_price: float  # $/M charged for uncached prompt tokens
-    h_raw: float       # published 24h cache hit rate, 0..1
-    h_used: float      # shrunk cache hit rate actually used
+    cache_hit_rate: float  # published 24h token-weighted cache hit rate, 0..1 (0 if no cache)
 
     token_cost_usd: float
     time_cost_usd: float
@@ -145,12 +139,8 @@ class ScoreBreakdown:
         return f"${self.total_cost_per_m:.4f}"
 
     @property
-    def formatted_h_raw(self) -> str:
-        return f"{self.h_raw * 100.0:.1f}%"
-
-    @property
-    def formatted_h_used(self) -> str:
-        return f"{self.h_used * 100.0:.1f}%"
+    def formatted_cache_hit_rate(self) -> str:
+        return f"{self.cache_hit_rate * 100.0:.1f}%"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -159,8 +149,7 @@ class ScoreBreakdown:
             "endpoint_id": self.endpoint_id,
             "rank": self.rank,
             "quantization": self.quantization,
-            "h_raw": round(self.h_raw, 4),
-            "h_used": round(self.h_used, 4),
+            "cache_hit_rate": round(self.cache_hit_rate, 4),
             "hit_price_per_m": round(self.hit_price, 6),
             "miss_price_per_m": round(self.miss_price, 6),
             "completion_price_per_m": round(self.out_price, 6),
@@ -180,23 +169,9 @@ class ScoreBreakdown:
         }
 
 
-def shrink_hit_rate(h: float, total_tokens: float, prior: float, prior_weight_tokens: float) -> float:
-    """Bayesian shrinkage of an observed hit rate toward ``prior``.
-
-    ``h_used = (h·T + prior·W) / (T + W)``. With ``T = 0`` this returns the prior; as ``T``
-    grows past ``W`` the observed rate dominates.
-    """
-    T = max(0.0, float(total_tokens))
-    W = max(0.0, float(prior_weight_tokens))
-    if T + W <= 0:
-        return prior
-    return (h * T + prior * W) / (T + W)
-
-
 def evaluate_endpoint(
     pricing: EndpointPricing,
     cache_hit_rate: Optional[float] = None,
-    total_tokens: int = 0,
     ttft_seconds: Optional[float] = None,
     throughput_tps: Optional[float] = None,
     uptime_pct: Optional[float] = None,
@@ -208,8 +183,8 @@ def evaluate_endpoint(
 ) -> ScoreBreakdown:
     """Score one endpoint with the ProviderScore model (see module docstring).
 
-    :param cache_hit_rate: Published 24h hit rate in 0..1. ``None`` falls back to the prior.
-    :param total_tokens: 24h tokens served by this endpoint; drives shrinkage weight.
+    :param cache_hit_rate: Published 24h token-weighted hit rate in 0..1, used as observed.
+                           ``None`` (no observation) is treated as a cold cache.
     :param ttft_seconds: Median time to first token.
     :param throughput_tps: Median output tokens per second.
     :param uptime_pct: 24h uptime in 0..100.
@@ -222,15 +197,14 @@ def evaluate_endpoint(
     # token is a miss at the input price and the hit rate is forced to zero.
     if pricing.input_cache_read is None:
         hit_price = miss_price = pricing.prompt
-        h_raw = h_used = 0.0
+        h = 0.0
     else:
         hit_price = pricing.input_cache_read
         miss_price = pricing.input_cache_write if pricing.input_cache_write is not None else pricing.prompt
-        h_raw = cfg.prior if cache_hit_rate is None else max(0.0, min(1.0, float(cache_hit_rate)))
-        h_used = shrink_hit_rate(h_raw, total_tokens, cfg.prior, cfg.prior_weight_tokens)
+        h = 0.0 if cache_hit_rate is None else max(0.0, min(1.0, float(cache_hit_rate)))
 
     # Token cost
-    effective_prompt_price = h_used * hit_price + (1.0 - h_used) * miss_price
+    effective_prompt_price = h * hit_price + (1.0 - h) * miss_price
     token_cost = (C * effective_prompt_price + O * pricing.completion) / 1_000_000.0 + pricing.request_fee
 
     # Time cost: waiting for the first token plus streaming the completion.
@@ -246,7 +220,7 @@ def evaluate_endpoint(
     failure_cost = 0.0
     if cfg.price_failures and uptime_pct is not None:
         failure_prob = 1.0 - max(0.0, min(1.0, uptime_pct / 100.0))
-        prefix_loss = C * h_used * (miss_price - hit_price) / 1_000_000.0
+        prefix_loss = C * h * (miss_price - hit_price) / 1_000_000.0
         failure_cost = failure_prob * (prefix_loss + per_sec * ttft)
 
     return ScoreBreakdown(
@@ -255,8 +229,7 @@ def evaluate_endpoint(
         endpoint_id=endpoint_id,
         hit_price=hit_price,
         miss_price=miss_price,
-        h_raw=h_raw,
-        h_used=h_used,
+        cache_hit_rate=h,
         token_cost_usd=token_cost,
         time_cost_usd=time_cost,
         failure_cost_usd=failure_cost,

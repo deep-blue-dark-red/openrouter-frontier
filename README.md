@@ -3,7 +3,7 @@
 **The price of an LLM call is not the list price. It is the expected cost of the turn, and
 that depends on who serves it.** Two providers selling the same model at the same price can
 differ by 25% in what you actually pay, because one hits the prompt cache 88% of the time and
-the other under 50%, one drops one request in eight and throws away your cached prefix, one makes
+the other under 50%, one drops one request in ten and throws away your cached prefix, one makes
 you wait four seconds for the first token. Nobody prices that. This does.
 
 OpenRouter Frontier pulls the observed 24-hour metrics for every endpoint serving a model —
@@ -11,7 +11,7 @@ prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effec
 **pricing** — and turns them into a single expected cost per turn, then reasons about it:
 
 - **ProviderScore scoring** – the expected dollars a conversation turn costs on each endpoint:
-  cache economics with Bayesian shrinkage for low-traffic endpoints, a value-of-time term, and
+  cache economics from each endpoint's observed 24-hour hit rate, a value-of-time term, and
   the cost of retrying a failed request. Reported per 1M tokens so it sits on the same scale as
   list prices, and often reorders them. The full model is in [Scoring model](#scoring-model).
 - **Pareto frontiers** – which providers are non-dominated across cost, latency, throughput,
@@ -84,20 +84,20 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
 ```
 
 ```text
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ProviderScore Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Mode: Full Utility Model  •  Turn: 2000 prompt + 500 completion tokens  •  Time Value: $0.00/hr
-Shrinkage: prior=50%, weight=1.0B tokens  •  Discounts: Applied  •  Failure Risk: Yes  •  Quantization: primary
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider            Scored $/M    Token $/M    Fail $/M  CacheHit   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0689      $0.0688     $0.0001     85.9%    88.0%   $0.0150    $0.0750     4.35s     34    99.8%
-NovitaAI               $0.0767      $0.0766     $0.0001     69.6%    81.7%   $0.0150    $0.0750     1.64s     37    99.7%
-GMICloud               $0.0844      $0.0842     $0.0002     53.8%    57.0%   $0.0150    $0.0750     4.10s     31    99.3%
-DeepInfra              $0.0863      $0.0861     $0.0002     49.7%    48.1%   $0.0150    $0.0750     0.82s     32    99.3%
-Parasail               $0.1418      $0.1409     $0.0009     82.4%    86.7%   $0.0300    $0.1500     1.47s     55    98.8%
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.
+Discounts: Applied  •  Failure Risk: Yes  •  Quantization: primary
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider            Scored $/M    Token $/M    Fail $/M  CacheHit   Hit $/M   Miss $/M   Latency    TPS   Uptime
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Z.ai                   $0.0680      $0.0675     $0.0005     88.5%   $0.0150    $0.0750     4.64s     31    98.9%
+NovitaAI               $0.0702      $0.0700     $0.0003     83.4%   $0.0150    $0.0750     1.70s     37    99.3%
+GMICloud               $0.0808      $0.0803     $0.0006     61.9%   $0.0150    $0.0750     5.57s     24    98.1%
+DeepInfra              $0.0876      $0.0875     $0.0001     46.9%   $0.0150    $0.0750     1.06s     24    99.5%
+Morph                  $0.1359      $0.1322     $0.0036     70.2%   $0.0200    $0.1300     1.81s     19    94.1%
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Lower Scored $/M is better. CacheHit is the published 24h token-weighted cache hit rate.
 ```
 
 Costs are computed for one turn (2000 prompt + 500 completion tokens by default) and shown
@@ -126,13 +126,13 @@ Objectives: Cost ↓  Latency ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quant
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Provider            Scored $/M    Token $/M   Latency    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0689      $0.0688     4.35s     34     85.9%    99.8%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
-NovitaAI               $0.0767      $0.0766     1.64s     37     69.6%    99.7%  ★ OPTIMAL        Balanced Trade-off
-GMICloud               $0.0844      $0.0842     4.10s     31     53.8%    99.3%  Dominated        --
-DeepInfra              $0.0863      $0.0861     0.82s     32     49.7%    99.3%  ★ OPTIMAL        Balanced Trade-off
-Parasail               $0.1418      $0.1409     1.47s     55     82.4%    98.8%  ★ OPTIMAL        Balanced Trade-off
-Modal                  $0.1690      $0.1690     0.44s     53     53.2%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
-io.net                 $0.1787      $0.1722     1.63s     10     49.8%    86.4%  Dominated        --
+Z.ai                   $0.0680      $0.0675     4.64s     31     88.5%    98.9%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
+NovitaAI               $0.0702      $0.0700     1.70s     37     83.4%    99.3%  ★ OPTIMAL        Balanced Trade-off
+GMICloud               $0.0808      $0.0803     5.57s     24     61.9%    98.1%  Dominated        --
+DeepInfra              $0.0876      $0.0875     1.06s     24     46.9%    99.5%  ★ OPTIMAL        Balanced Trade-off
+Parasail               $0.1408      $0.1380     1.29s     68     85.4%    96.6%  ★ OPTIMAL        Balanced Trade-off
+Modal                  $0.1635      $0.1634     0.43s     51     58.9%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
+io.net                 $0.1945      $0.1915     1.47s     12     29.7%    89.5%  Dominated        --
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ★ OPTIMAL marks non-dominated providers: no other provider is at least as good on every objective and better on one.
 ```
@@ -226,22 +226,14 @@ $$
 \text{missPrice} = \begin{cases}\text{in} & \text{if read absent}\\ \text{write} & \text{if write present}\\ \text{in} & \text{otherwise}\end{cases}
 $$
 
-**Bayesian shrinkage.** The published 24-hour hit rate $h$ of a low-traffic endpoint is noisy.
-It is shrunk toward a prior using the endpoint's 24-hour token volume $T$ as evidence and a
-pseudo-count $W$ (in tokens) behind the prior:
-
-$$
-h_{\text{used}} = \frac{h \cdot T + \text{prior} \cdot W}{T + W}
-\qquad(\text{prior}=0.5,\; W = 10^9 \text{ by default})
-$$
-
-An endpoint that served $10^9$ tokens sits halfway between its observed rate and the prior; one
-that served $10^{11}$ tokens is almost entirely trusted.
+**Cache hit rate.** $h$ is the endpoint's published 24-hour token-weighted cache hit rate,
+used exactly as observed. It is a measurement over millions of requests, not an estimate, so
+no shrinkage or prior is applied. An endpoint with no published rate is scored as a cold cache.
 
 **Token cost.**
 
 $$
-\text{tokenCost} = \frac{C\,\big(h_{\text{used}}\,\text{hitPrice} + (1-h_{\text{used}})\,\text{missPrice}\big) + O\,\text{out}}{10^6} + \text{requestFee}
+\text{tokenCost} = \frac{C\,\big(h\,\text{hitPrice} + (1-h)\,\text{missPrice}\big) + O\,\text{out}}{10^6} + \text{requestFee}
 $$
 
 **Time cost.** With a value of time $v$ in USD/hour, waiting for the first token and streaming
@@ -256,7 +248,7 @@ losing the cached prefix (the cached share is paid at miss price instead of hit 
 time already spent waiting:
 
 $$
-\text{failureCost} = (1-\text{uptime})\left[\frac{C\,h_{\text{used}}\,(\text{missPrice}-\text{hitPrice})}{10^6} + \frac{v}{3600}\,\text{ttft}\right]
+\text{failureCost} = (1-\text{uptime})\left[\frac{C\,h\,(\text{missPrice}-\text{hitPrice})}{10^6} + \frac{v}{3600}\,\text{ttft}\right]
 $$
 
 $$
@@ -272,7 +264,7 @@ token cost model.
 **Dominance.** Provider $b$ dominates $a$ if $b$ is at least as good on every objective and
 strictly better on at least one. Providers that nobody dominates form the frontier. A missing
 metric is treated as the worst possible value, so an endpoint with no latency data can never
-win on latency. The provider frontier uses scored cost, TTFT, throughput, $h_{\text{used}}$,
+win on latency. The provider frontier uses scored cost, TTFT, throughput, $h$,
 and uptime; the catalog frontier (`provider_frontier.py --models`) uses turn cost, context
 length, cache-read price, and completion price.
 
@@ -296,7 +288,7 @@ from openrouter_frontier import (
 
 # Rank providers by expected cost (token cost + failure risk by default).
 for s in score_model_providers("z-ai/glm-5.3-flash")[:3]:
-    print(f"{s.provider_name:<12} {s.formatted_total_cost}/M  cache hit used {s.formatted_h_used}")
+    print(f"{s.provider_name:<12} {s.formatted_total_cost}/M  cache hit {s.formatted_cache_hit_rate}")
 
 # A longer-context agentic turn, valuing time at $30/hr.
 cfg = ScoringConfig(prompt_tokens=8000, completion_tokens=1000, time_value_usd_per_hour=30.0)

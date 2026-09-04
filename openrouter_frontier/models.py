@@ -97,7 +97,6 @@ class ProviderStats:
         return evaluate_endpoint(
             pricing=self.pricing,
             cache_hit_rate=self.cache_hit_rate,
-            total_tokens=self.total_tokens,
             ttft_seconds=ttft,
             throughput_tps=self.throughput_p50_tps,
             uptime_pct=self.uptime_1d_pct,

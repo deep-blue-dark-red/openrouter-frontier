@@ -7,7 +7,7 @@ time-value guess, this reports which providers are non-dominated across five obj
     minimise  scored cost per turn      (ProviderScore, pure token cost + failure risk)
     minimise  p50 time to first token
     maximise  p50 throughput (tokens/s)
-    maximise  shrunk cache hit rate
+    maximise  24h cache hit rate
     maximise  24h uptime
 
 A secondary ``--models`` mode runs a catalog-wide frontier over turn cost, context length,
@@ -52,8 +52,7 @@ class ProviderCandidate:
     token_cost_usd: float        # per turn
     scored_cost_per_m: float     # same cost normalised to $ per 1M tokens (display)
     token_cost_per_m: float
-    h_used: float
-    h_raw: float
+    cache_hit_rate: float
     hit_price: float
     miss_price: float
     ttft_seconds: Optional[float]
@@ -68,7 +67,7 @@ PROVIDER_OBJECTIVES = [
     Objective(lambda c: c.scored_cost_usd, minimize=True),
     Objective(lambda c: c.ttft_seconds, minimize=True),
     Objective(lambda c: c.throughput_tps, minimize=False),
-    Objective(lambda c: c.h_used, minimize=False),
+    Objective(lambda c: c.cache_hit_rate, minimize=False),
     Objective(lambda c: c.uptime_pct, minimize=False),
 ]
 
@@ -83,7 +82,7 @@ def compute_provider_pareto(candidates: List[ProviderCandidate]) -> List[Provide
     min_cost = min(c.scored_cost_usd for c in candidates)
     min_lat = min((c.ttft_seconds for c in candidates if c.ttft_seconds is not None), default=None)
     max_tps = max((c.throughput_tps for c in candidates if c.throughput_tps is not None), default=None)
-    max_hit = max(c.h_used for c in candidates)
+    max_hit = max(c.cache_hit_rate for c in candidates)
     max_upt = max((c.uptime_pct for c in candidates if c.uptime_pct is not None), default=None)
 
     for c in candidates:
@@ -96,7 +95,7 @@ def compute_provider_pareto(candidates: List[ProviderCandidate]) -> List[Provide
             traits.append("Lowest Latency")
         if max_tps is not None and _near(c.throughput_tps, max_tps, 3.0):
             traits.append("Highest TPS")
-        if _near(c.h_used, max_hit, 0.01):
+        if _near(c.cache_hit_rate, max_hit, 0.01):
             traits.append("Best Cache Hit")
         if max_upt is not None and _near(c.uptime_pct, max_upt, 0.2):
             traits.append("Highest Uptime")
@@ -123,7 +122,7 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
             f"${c.token_cost_per_m:.4f}",
             fmt_seconds(c.ttft_seconds),
             fmt_tps(c.throughput_tps),
-            f"{c.h_used * 100.0:.1f}%",
+            f"{c.cache_hit_rate * 100.0:.1f}%",
             fmt_pct(c.uptime_pct),
             OPTIMAL if c.is_pareto else DOMINATED,
             c.niche if c.is_pareto else "--",
@@ -308,8 +307,7 @@ def main() -> None:
             token_cost_usd=s.token_cost_usd,
             scored_cost_per_m=s.total_cost_per_m,
             token_cost_per_m=s.token_cost_per_m,
-            h_used=s.h_used,
-            h_raw=s.h_raw,
+            cache_hit_rate=s.cache_hit_rate,
             hit_price=s.hit_price,
             miss_price=s.miss_price,
             ttft_seconds=s.ttft_seconds,
