@@ -260,7 +260,6 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
     console.print(f"[dim]Task $ = Token $ + Fail $ + Time $. Time $ = Task Time at ${cfg.time_value_usd_per_hour:.0f}/hr; no other column contains time. "
                   "Task Time = prefill (new tokens, and the prefix again after a cache miss) + decoding + overhead. TTFT is shown, not charged. "
                   "$/M = Task $ per 1M submitted tokens. * = missing telemetry imputed worst-case.[/dim]\n")
-                  "$/M = task cost per 1M submitted tokens (secondary). * = missing telemetry imputed worst-case.[/dim]\n")
 
 
 @main.command(name="cache")
