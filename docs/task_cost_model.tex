@@ -117,9 +117,11 @@ current.
 \toprule
 Symbol & Meaning & Default \\
 \midrule
-$a, o$ & new and completion tokens per turn & $2000$, $500$ \\
-$N$ & turns; default grows the transcript to $3 \times 10^5$ tokens & $120$ \\
+$a$ & new prompt tokens per turn (user text, tool results) & $2000$ \\
+$N$ & turns; default grows the context to $3 \times 10^5$ tokens & $145$ \\
+$o$ & completion tokens per turn; default: $10^4$ total output over $N$ & $69$ \\
 $v$ & value of the caller's time, USD per hour & $20$ \\
+$\gamma$ & prompt-processing speed as a multiple of decode throughput & $100$ \\
 $\rho$ & routing policy: \textsf{order} or \textsf{sticky} & \textsf{sticky} (OpenRouter default) \\
 $(e_1, \dots, e_m)$ & fallback chain; $e_1$ is the scored endpoint & $(e_1, B)$, $B$ a cold outside option \\
 miss policy & prefix on a miss \emph{rewritten} ($m = w$) or \emph{processed} ($m = b$) & rewritten \\
@@ -159,11 +161,14 @@ cached prefix for this task unless the routing policy says otherwise.
 \end{assumption}
 
 \begin{assumption}[Time is linear in tokens]\label{as:time}
-A request costs $\ell$ seconds to first token and $o \cdot s$ seconds to
-generate, where $s = 1/g$ is seconds per output token. Time is valued at $v$
-USD per hour; write $v' = v / 3600$. Time to first token is treated as
-independent of prompt length because OpenRouter publishes a single value per
-endpoint.
+A request costs $\ell$ seconds to first token plus the prefill of any prompt
+tokens the cache does not hold, and $o \cdot s$ seconds to generate, where
+$s = 1/g$ is seconds per output token. Prompt processing runs at
+$g_p = \gamma\, g$ tokens per second, roughly a hundred times decode, so a
+missed prefix of $S_k$ tokens adds $S_k / g_p$ seconds. The published time to
+first token is taken to cover queueing and the prefill of the new tokens $a$
+under the publisher's typical cache mix; only the missed prefix is charged on
+top of it. Time is valued at $v$ USD per hour; write $v' = v / 3600$.
 \end{assumption}
 
 \begin{assumption}[Missing telemetry is worst-case]\label{as:missing}
@@ -244,17 +249,22 @@ inputs $h, u, \E[\ell], \E[s]$, and $q = 1 - u$.
   X_k^{\text{ok}}
   = \underbrace{f + w\,a + c\,o}_{\text{fixed}}
   + \underbrace{v'\big(\ell + o\, s\big)}_{\text{time}}
-  + \underbrace{S_k\,\big[\, m - H_k\,(m - r)\,\big]}_{\text{prefix}} .
+  + \underbrace{S_k\,\big[\, m - H_k\,(m - r)\,\big]}_{\text{prefix money}}
+  + \underbrace{v'\,(1 - H_k)\, S_k / g_p}_{\text{prefix re-prefill}} .
 \end{equation}
-Taking expectations,
+Taking expectations, and writing $\rho = v' / g_p$ for the time value of
+re-prefilling one prefix token,
 \begin{equation}\label{eq:turn-ok-mean}
   \mu_k^{\text{ok}} = \alpha + \pi\, S_k,
   \qquad
   \alpha = f + w\,a + c\,o + v'\big(\E[\ell] + o\,\E[s]\big),
   \qquad
-  \pi = h\, r + (1 - h)\, m .
+  \pi = h\, r + (1 - h)\,(m + \rho) .
 \end{equation}
-$\pi$ is the \emph{effective prefix price}. The new tokens never receive it.
+$\pi$ is the \emph{effective prefix price}, in dollars of money and time per
+prefix token. The new tokens never receive it. A cache miss therefore costs
+both the price spread $m - r$ and $\rho$ per token of waiting; on a 200k-token
+prefix at $g_p = 3000$ tokens/s the wait alone is over a minute.
 
 \subsection{Failed turn on a two-link chain}
 
@@ -266,19 +276,19 @@ $B$: every prompt token is new to $B$ and is written at $w_B$.
 \begin{split}
   X_k^{\text{fail}}
   = v' \E[\ell_A]
-  &+ \underbrace{f_B + w_B\,(S_k + a) + c_B\, o + v'\big(\E[\ell_B] + o\,\E[s_B]\big)}_{\text{cold turn on } B} \\
-  &+ \underbrace{\ind[\rho = \textsf{order}]\;\ind[k < N]\;h\,(m - r)\, d}_{\text{return penalty}} .
+  &+ \underbrace{f_B + w_B\,(S_k + a) + c_B\, o + v'\big(\E[\ell_B] + o\,\E[s_B]\big) + \rho_B\, S_k}_{\text{cold turn on } B} \\
+  &+ \underbrace{\ind[\textsf{order}]\;\ind[k < N]\;h\,(m - r + \rho)\, d}_{\text{return penalty}} .
 \end{split}
 \end{equation}
 This branch is deterministic given the failure, so
-$\mu_k^{\text{fail}} = \beta + w_B S_k + \ind[\rho = \textsf{order}]\ind[k<N]\,h(m-r)d$
+$\mu_k^{\text{fail}} = \beta + (w_B + \rho_B) S_k + \ind[\textsf{order}]\ind[k<N]\,h(m-r+\rho)d$
 with $\beta = v'\E[\ell_A] + f_B + w_B a + c_B o + v'(\E[\ell_B] + o\E[s_B])$.
 
 \paragraph{The return penalty depends on the routing policy.}
 Under an explicit provider \textsf{order}, OpenRouter disables load balancing
 and the next turn goes back to $A$. $A$ never saw turn $k$'s completion, so of
 $S_{k+1}$ only $S_k$ can be cached and the extra $d$ tokens are written at $w$
-rather than read at the blended price; the expected extra cost is $h(m-r)d$,
+rather than read at the blended price, and re-prefilled; the expected extra cost is $h(m-r+\rho)d$,
 booked here at turn $k$ (there is no turn $N+1$, hence the indicator). Under
 \textsf{sticky} routing, OpenRouter's default, the provider that served the last
 cached request becomes the sticky provider, so after a fallback the task
@@ -292,8 +302,8 @@ surcharge, and it has its own closed form in Section~\ref{sec:sticky}.
 \begin{split}
   \E[X_k] &= (1-q)\,\mu_k^{\text{ok}} + q\,\mu_k^{\text{fail}} \\
   &= \underbrace{(1-q)\,\alpha + q\,\beta}_{A_0}
-  + \underbrace{\big[(1-q)\,\pi + q\, w_B\big]}_{\Pi}\, S_k
-  + q\,\ind[k<N]\,h\,(m-r)\,d .
+  + \underbrace{\big[(1-q)\,\pi + q\,(w_B + \rho_B)\big]}_{\Pi}\, S_k
+  + q\,\ind[k<N]\,h\,(m-r+\rho)\,d .
 \end{split}
 \end{equation}
 Apart from the last-turn indicator the turn cost is affine in the prefix, with
@@ -308,7 +318,7 @@ policy \textsf{order}, and constant growth $S_k = (k-1)d$,
 \begin{equation}\label{eq:task-mean}
   \boxed{\;
   \E[X_{\text{task}}]
-  = N\, A_0 \;+\; \Pi\, d\, \frac{N(N-1)}{2} \;+\; q\,h\,(m-r)\,d\,(N-1)
+  = N\, A_0 \;+\; \Pi\, d\, \frac{N(N-1)}{2} \;+\; q\,h\,(m-r+\rho)\,d\,(N-1)
   \;}
 \end{equation}
 \end{proposition}
@@ -324,8 +334,8 @@ misses and failures add:
 \begin{equation}\label{eq:decomp}
   \Pi\, d\, \frac{N(N-1)}{2}
   = \underbrace{r\, d\, \tfrac{N(N-1)}{2}}_{\text{cached-read baseline}}
-  + \underbrace{(1-q)\,(1-h)\,(m - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{miss premium}}
-  + \underbrace{q\,(w_B - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{failure premium}} .
+  + \underbrace{(1-q)\,(1-h)\,(m - r + \rho)\, d\, \tfrac{N(N-1)}{2}}_{\text{miss premium}}
+  + \underbrace{q\,(w_B + \rho_B - r)\, d\, \tfrac{N(N-1)}{2}}_{\text{failure premium}} .
 \end{equation}
 All three are $\Theta(N^2)$: there are $N$ submissions and the $k$-th exposes a
 prefix of $(k-1)d$ tokens, so every per-token surcharge on the prefix is paid on
@@ -344,7 +354,7 @@ does affect totals.
 \begin{remark}[Relation to the single-turn scorer]
 The current scorer takes one prompt size $C$ and applies $\pi$ to all of it.
 That treats the new tokens as partly cached and underprices each turn by
-$h\,(m - r)\,a$; it uses two prompt prices where there are three; and it reports
+$h\,(m - r)\,a$; it uses two prompt prices where there are three; it charges no time for re-prefilling a missed prefix; and it reports
 one turn, not $N$. Replacing $C$ by the pair $(a, S_k)$, adding the write price,
 and summing over $k$ recovers \eqref{eq:task-mean}.
 \end{remark}
@@ -423,14 +433,14 @@ of total variance,
 \end{equation}
 with $V_k^{\text{fail}} = 0$ (the cold branch is deterministic) and
 \begin{equation}\label{eq:var-ok}
-  V_k^{\text{ok}} = (m-r)^2\, S_k^2\, \Var[H_k] \;\le\; (m-r)^2\, h(1-h)\, S_k^2 .
+  V_k^{\text{ok}} = (m-r+\rho)^2\, S_k^2\, \Var[H_k] \;\le\; (m-r+\rho)^2\, h(1-h)\, S_k^2 .
 \end{equation}
 Summing,
 \begin{equation}\label{eq:var}
 \begin{split}
   \Var[X_{\text{task}}]
-  \;\le\;& (1-q)\,(m-r)^2\, h(1-h)\, d^2\, \frac{(N-1)N(2N-1)}{6} \\
-  &+ q(1-q) \sum_{k=1}^{N} \big[(\beta - \alpha) + (w_B - \pi) S_k + \ind[k<N]\,h\,(m-r)\,d\big]^2 .
+  \;\le\;& (1-q)\,(m-r+\rho)^2\, h(1-h)\, d^2\, \frac{(N-1)N(2N-1)}{6} \\
+  &+ q(1-q) \sum_{k=1}^{N} \big[(\beta - \alpha) + (w_B + \rho_B - \pi) S_k + \ind[k<N]\,h\,(m-r+\rho)\,d\big]^2 .
 \end{split}
 \end{equation}
 The first term is attained by the Bernoulli model; its standard deviation grows
@@ -442,7 +452,7 @@ statement should be made from it.
 Equation \eqref{eq:turn-fail} books the return penalty at turn $k$ as an
 expected quantity. If instead the realised extra cost is attributed to turn
 $k+1$, $X_{k+1}$ depends on $F_k$ and the turns are no longer independent;
-$\Cov(X_k, X_{k+1}) = O(q)\,(m-r)\,d\,S_{k+1}$ terms appear. The expectation is
+$\Cov(X_k, X_{k+1}) = O(q)\,(m-r+\rho)\,d\,S_{k+1}$ terms appear. The expectation is
 unchanged either way. The model as written is exact for its own bookkeeping and
 neglects covariance of order $q$ under the alternative.
 \end{remark}
@@ -453,9 +463,9 @@ Suppose the true reusable-prefix hit rate for this task is $h + \delta$, with
 $\E[\delta] = 0$ and $\Var[\delta] = \sigma_h^2$, shared across all turns
 (drift of the 24-hour window, or mismatch between the published workload and
 the caller's). Since $\partial \E[X_{\text{task}}] / \partial h =
--(1-q)(m-r)\sum_k S_k + O(q)$,
+-(1-q)(m-r+\rho)\sum_k S_k + O(q)$,
 \begin{equation}\label{eq:var-param}
-  \sigma_{\text{par}} = (1-q)\,(m-r)\,\sigma_h\, d\,\frac{N(N-1)}{2} = O(N^2),
+  \sigma_{\text{par}} = (1-q)\,(m-r+\rho)\,\sigma_h\, d\,\frac{N(N-1)}{2} = O(N^2),
   \qquad
   \Var_{\text{par}} = O(N^4).
 \end{equation}
@@ -490,8 +500,8 @@ the trade-offs.
 GLM 5.3 Flash, primary endpoints, 2026-09-04. Every endpoint lists
 $b = 0.075$, $r = 0.015$, $c = 0.25$ USD per million tokens and publishes no
 write price, so $w = m = b$ and only telemetry separates them. Task profile
-$a = 2000$, $o = 500$, $N = 200$, $v = 0$, routing \textsf{order}, chain
-$(A, A\text{ cold})$.
+$a = 2000$, $o = 500$, $N = 200$, $v = 0$ (so $\rho = 0$), routing
+\textsf{order}, chain $(A, A\text{ cold})$.
 
 \begin{center}
 \begin{tabular}{@{}lrrrr@{}}

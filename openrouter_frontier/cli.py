@@ -152,10 +152,12 @@ def _task_options(f):
     """Task-profile options shared by ``score``, ``cache`` and ``compare``."""
     opts = [
         click.option("--new-tokens", "-a", "--prompt-tokens", "-c", "new_tokens", default=2000, type=int, show_default=True, help="New prompt tokens per turn (a)."),
-        click.option("--completion-tokens", "-o", default=500, type=int, show_default=True, help="Completion tokens per turn (o)."),
-        click.option("--task-tokens", default=300_000, type=int, show_default=True, help="Transcript size the task grows to; N = task_tokens/(a+o)."),
-        click.option("--turns", "-N", default=None, type=int, help="Explicit number of turns (overrides --task-tokens)."),
+        click.option("--task-tokens", default=300_000, type=int, show_default=True, help="Transcript size the task grows to."),
+        click.option("--output-tokens", default=10_000, type=int, show_default=True, help="Total completion tokens over the task."),
+        click.option("--completion-tokens", "-o", default=None, type=int, help="Completion tokens per turn (overrides --output-tokens)."),
+        click.option("--turns", "-N", default=None, type=int, help="Explicit number of turns."),
         click.option("--time-value", "-t", default=20.0, type=float, show_default=True, help="Value of your time in USD/hr; 0 disables."),
+        click.option("--prefill-multiplier", default=100.0, type=float, show_default=True, help="Prompt-processing speed as a multiple of decode throughput."),
         click.option("--price-failures/--no-failures", default=True, help="Price failures from 24h uptime."),
         click.option("--routing", type=click.Choice(["sticky", "order"]), default="sticky", show_default=True, help="OpenRouter routing policy assumed."),
         click.option("--miss-policy", type=click.Choice(["rewrite", "process"]), default="rewrite", show_default=True, help="Cache-miss billing policy."),
@@ -173,9 +175,9 @@ def _task_options(f):
 
 def _config(kw: Dict[str, Any]) -> ScoringConfig:
     return ScoringConfig(
-        new_tokens_per_turn=kw["new_tokens"], completion_tokens=kw["completion_tokens"],
-        task_tokens=kw["task_tokens"], turns=kw["turns"],
-        time_value_usd_per_hour=kw["time_value"], price_failures=kw["price_failures"],
+        new_tokens_per_turn=kw["new_tokens"], task_tokens=kw["task_tokens"], output_tokens=kw["output_tokens"],
+        completion_tokens=kw["completion_tokens"], turns=kw["turns"],
+        time_value_usd_per_hour=kw["time_value"], prefill_multiplier=kw["prefill_multiplier"], price_failures=kw["price_failures"],
         routing=kw["routing"], miss_policy=kw["miss_policy"], cache_mode=kw["cache_mode"],
         assumed_hit_rate=kw["assumed_hit_rate"], sigma_h=kw["sigma_h"],
         lambda_proc=kw["lambda_proc"], lambda_par=kw["lambda_par"], apply_discount=kw["discount"],
@@ -357,7 +359,7 @@ def compare_command(model: str, providers: List[str], **kw):
         _fail("No matching providers found to compare.")
 
     table = Table(
-        title=f"Provider Comparison for {stats.model_name} ({cfg.n_turns} turns × {cfg.new_tokens_per_turn}+{cfg.completion_tokens} tok)",
+        title=f"Provider Comparison for {stats.model_name} ({cfg.n_turns} turns × {cfg.new_tokens_per_turn}+{cfg.completion_per_turn} tok)",
         header_style="bold magenta",
     )
     table.add_column("Provider", style="bold white", no_wrap=True)

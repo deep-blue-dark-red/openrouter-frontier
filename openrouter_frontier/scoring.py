@@ -35,11 +35,17 @@ class ScoringConfig:
     """Task profile and caller preferences.
 
     :param new_tokens_per_turn: ``a`` — prompt tokens appended each turn (user text, tool results).
-    :param completion_tokens: ``o`` — completion tokens generated each turn.
-    :param task_tokens: total transcript size the task grows to; ``turns`` is derived as
-                        ``task_tokens / (a + o)`` unless given explicitly.
-    :param turns: ``N`` — explicit number of turns (overrides ``task_tokens``).
+    :param task_tokens: total transcript size the task grows to (context at the last turn).
+    :param output_tokens: total completion tokens generated over the whole task. Output is a
+                          small share of an agentic transcript: most of it is tool results.
+    :param completion_tokens: ``o`` — completion tokens per turn. Derived from ``output_tokens``
+                              and the number of turns unless given explicitly.
+    :param turns: ``N`` — explicit number of turns. Derived as
+                  ``(task_tokens - output_tokens) / a`` unless given explicitly.
     :param time_value_usd_per_hour: ``v`` — value of the caller's wall-clock time.
+    :param prefill_multiplier: prompt-processing speed as a multiple of the endpoint's decode
+                               throughput (prefill is ~100× faster than generation). A cache
+                               miss re-prefills the whole prefix at this rate; a hit skips it.
     :param price_failures: charge for failures using the endpoint's 24h uptime.
     :param routing: ``"sticky"`` (OpenRouter default: a fallback becomes the new sticky
                     provider) or ``"order"`` (explicit provider order: return to the primary).
@@ -55,10 +61,12 @@ class ScoringConfig:
     """
 
     new_tokens_per_turn: int = 2000
-    completion_tokens: int = 500
     task_tokens: int = 300_000
+    output_tokens: int = 10_000
+    completion_tokens: Optional[int] = None
     turns: Optional[int] = None
     time_value_usd_per_hour: float = 20.0
+    prefill_multiplier: float = 100.0
     price_failures: bool = True
     routing: str = "sticky"
     miss_policy: str = "rewrite"
@@ -70,9 +78,11 @@ class ScoringConfig:
     apply_discount: bool = True
 
     def __post_init__(self) -> None:
-        if self.new_tokens_per_turn < 0 or self.completion_tokens < 0:
+        if self.new_tokens_per_turn < 0 or self.output_tokens < 0:
             raise ValueError("token counts must be non-negative")
-        if self.new_tokens_per_turn + self.completion_tokens == 0:
+        if self.completion_tokens is not None and self.completion_tokens < 0:
+            raise ValueError("completion_tokens must be non-negative")
+        if self.new_tokens_per_turn + self.completion_per_turn == 0:
             raise ValueError("a turn must contain at least one token")
         if self.routing not in ("sticky", "order"):
             raise ValueError("routing must be 'sticky' or 'order'")
@@ -86,6 +96,8 @@ class ScoringConfig:
             raise ValueError("sigma_h and lambdas must be non-negative")
         if self.time_value_usd_per_hour < 0:
             raise ValueError("time value must be non-negative")
+        if self.prefill_multiplier <= 0:
+            raise ValueError("prefill_multiplier must be positive")
         if self.turns is not None and self.turns < 1:
             raise ValueError("turns must be >= 1")
         if self.task_tokens < 1:
@@ -94,16 +106,32 @@ class ScoringConfig:
     # -- derived profile
 
     @property
-    def growth_per_turn(self) -> int:
-        """``d = a + o``."""
-        return self.new_tokens_per_turn + self.completion_tokens
-
-    @property
     def n_turns(self) -> int:
-        """``N``: explicit, else the number of turns that grows the transcript to ``task_tokens``."""
+        """``N``: explicit, else the number of turns that grows the transcript to ``task_tokens``.
+
+        With ``o`` derived from the task's total output, ``N·a + output = task`` gives
+        ``N = (task_tokens − output_tokens) / a``. With ``o`` given explicitly,
+        ``N = task_tokens / (a + o)``.
+        """
         if self.turns is not None:
             return self.turns
-        return max(1, round(self.task_tokens / self.growth_per_turn))
+        if self.completion_tokens is not None:
+            return max(1, round(self.task_tokens / (self.new_tokens_per_turn + self.completion_tokens)))
+        if self.new_tokens_per_turn <= 0:
+            return 1
+        return max(1, round(max(0, self.task_tokens - self.output_tokens) / self.new_tokens_per_turn))
+
+    @property
+    def completion_per_turn(self) -> int:
+        """``o``: explicit, else the task's total output spread evenly over the turns."""
+        if self.completion_tokens is not None:
+            return self.completion_tokens
+        return max(0, round(self.output_tokens / self.n_turns))
+
+    @property
+    def growth_per_turn(self) -> int:
+        """``d = a + o``."""
+        return self.new_tokens_per_turn + self.completion_per_turn
 
     @property
     def time_value_per_second(self) -> float:
@@ -281,6 +309,7 @@ class ScoreBreakdown:
     uptime_pct: Optional[float]     # u·100
     ttft_seconds: Optional[float]   # E[l]
     seconds_per_token: Optional[float]  # E[s]
+    prefill_tps: Optional[float]        # prompt-processing rate assumed for misses
     throughput_tps: Optional[float]     # p50, for display
     imputed: List[str]
 
@@ -408,6 +437,7 @@ class ScoreBreakdown:
                 "uptime_pct": self.uptime_pct,
                 "expected_ttft_seconds": r6(self.ttft_seconds),
                 "expected_seconds_per_token": r6(self.seconds_per_token),
+                "prefill_tps": self.prefill_tps,
                 "throughput_p50_tps": self.throughput_tps,
                 "imputed": list(self.imputed),
             },
@@ -447,6 +477,7 @@ class _Ep:
     """Resolved per-endpoint scalars, USD per *token*."""
     b: float; r: float; w: float; m: float; c: float; f: float
     h: float; q: float; El: float; Es: float
+    Ep: float  # seconds per prefilled prompt token (0 if unknown)
 
 
 def _resolve(pricing: EndpointPricing, inp: EndpointInputs, cfg: ScoringConfig) -> _Ep:
@@ -473,7 +504,8 @@ def _resolve(pricing: EndpointPricing, inp: EndpointInputs, cfg: ScoringConfig) 
 
     El = inp.expected_ttft or 0.0
     Es = inp.expected_seconds_per_token or 0.0
-    return _Ep(b, r, w, m, c, f, h, q, El, Es)
+    Ep = 1.0 / (cfg.prefill_multiplier * inp.tps_p50) if inp.tps_p50 and inp.tps_p50 > 0 else 0.0
+    return _Ep(b, r, w, m, c, f, h, q, El, Es, Ep)
 
 
 @dataclass
@@ -494,7 +526,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
     Direct evaluation of Proposition 1 (routing 'order') and Section 7 (routing 'sticky');
     the loop is exact and avoids the geometric-sum special cases.
     """
-    a, o, N = cfg.new_tokens_per_turn, cfg.completion_tokens, cfg.n_turns
+    a, o, N = cfg.new_tokens_per_turn, cfg.completion_per_turn, cfg.n_turns
     d = a + o
     vps = cfg.time_value_per_second
     hA = A.h if h_override is None else h_override
@@ -511,9 +543,11 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
     timeB = vps * (B.El + o * B.Es)
     piA = hA * A.r + (1.0 - hA) * A.m
     piB = hB * B.r + (1.0 - hB) * B.m
-    ret_per = hA * (A.m - A.r) * d                # return penalty under 'order'
-    var_missA = (A.m - A.r) ** 2 * hA * (1.0 - hA)
-    var_missB = (B.m - B.r) ** 2 * hB * (1.0 - hB)
+    prefA = vps * A.Ep                            # $ of wall-clock per re-prefilled prefix token
+    prefB = vps * B.Ep
+    ret_per = hA * (A.m - A.r + prefA) * d        # return penalty under 'order' (money + prefill time)
+    var_missA = (A.m - A.r + prefA) ** 2 * hA * (1.0 - hA)
+    var_missB = (B.m - B.r + prefB) ** 2 * hB * (1.0 - hB)
 
     on_A = 1.0  # P(still on A at turn k) under sticky; always 1 under order
     for k in range(1, N + 1):
@@ -525,7 +559,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
 
         # --- successful warm turn on A
         acc.fixed += p_ok * fixA
-        acc.time += p_ok * timeA
+        acc.time += p_ok * (timeA + (1.0 - hA) * S * prefA)   # missed prefix is re-prefilled
         acc.read += p_ok * A.r * S
         acc.miss += p_ok * (1.0 - hA) * (A.m - A.r) * S
         acc.reads += p_ok * hA * S
@@ -533,11 +567,11 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         acc.ordinary += p_ok * ((1.0 - hA) * S if cfg.miss_policy == "process" else 0.0)
         acc.comp += p_ok * o
         acc.var += p_ok * var_missA * S * S
-        acc.par += p_ok * (A.m - A.r) * S
+        acc.par += p_ok * (A.m - A.r + prefA) * S
 
         # --- failed on A, served cold by B
         acc.fixed += p_fail * fixB_cold
-        acc.time += p_fail * timeFail
+        acc.time += p_fail * (timeFail + S * prefB)        # whole prefix prefilled cold on B
         acc.read += p_fail * A.r * S                       # baseline at A's read price ...
         acc.fail += p_fail * (B.w - A.r) * S               # ... plus the cold surcharge
         acc.writes += p_fail * (S + a)
@@ -545,8 +579,8 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         if cfg.routing == "order" and k < N:
             acc.ret += p_fail * ret_per
         # mixture term of the law of total variance: (μ_fail − μ_ok)^2
-        mu_ok = fixA + timeA + piA * S
-        mu_fail = fixB_cold + timeFail + B.w * S + (ret_per if (cfg.routing == "order" and k < N) else 0.0)
+        mu_ok = fixA + timeA + piA * S + (1.0 - hA) * S * prefA
+        mu_fail = fixB_cold + timeFail + B.w * S + S * prefB + (ret_per if (cfg.routing == "order" and k < N) else 0.0)
         if cfg.routing == "order":
             acc.var += q * (1.0 - q) * (mu_fail - mu_ok) ** 2
         else:
@@ -555,7 +589,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         # --- warm turn on B (sticky only, after migration)
         if p_B > 0:
             acc.fixed += p_B * (B.f + B.w * a + B.c * o)
-            acc.time += p_B * timeB
+            acc.time += p_B * (timeB + (1.0 - hB) * S * prefB)
             acc.read += p_B * B.r * S
             acc.miss += p_B * (1.0 - hB) * (B.m - B.r) * S
             acc.reads += p_B * hB * S
@@ -563,7 +597,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
             acc.ordinary += p_B * ((1.0 - hB) * S if cfg.miss_policy == "process" else 0.0)
             acc.comp += p_B * o
             acc.var += p_B * var_missB * S * S
-            acc.par += p_B * (B.m - B.r) * S
+            acc.par += p_B * (B.m - B.r + prefB) * S
 
         if cfg.routing == "sticky":
             on_A *= x
@@ -616,8 +650,9 @@ def evaluate_endpoint(
         request_fee=pricing.request_fee,
         cache_hit_rate=A.h, uptime_pct=inp.uptime_pct,
         ttft_seconds=inp.expected_ttft, seconds_per_token=inp.expected_seconds_per_token,
+        prefill_tps=(cfg.prefill_multiplier * inp.tps_p50) if inp.tps_p50 else None,
         throughput_tps=inp.tps_p50, imputed=list(inp.imputed),
-        new_tokens=cfg.new_tokens_per_turn, completion_tokens=cfg.completion_tokens,
+        new_tokens=cfg.new_tokens_per_turn, completion_tokens=cfg.completion_per_turn,
         turns=cfg.n_turns, routing=cfg.routing,
         task_cost_usd=acc.total, fixed_cost_usd=acc.fixed, time_cost_usd=acc.time,
         read_baseline_usd=acc.read, miss_premium_usd=acc.miss, failure_premium_usd=acc.fail,

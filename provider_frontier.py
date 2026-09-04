@@ -228,7 +228,7 @@ def print_model_table(candidates: List[ModelCandidate], cfg: ScoringConfig, tota
         title="OpenRouter Catalog Model Pareto Frontier",
         subtitle_lines=[
             f"{sum(c.is_pareto for c in candidates)} Pareto-optimal of {total} priced models"
-            f"  •  Turn: {cfg.prompt_tokens} prompt + {cfg.completion_tokens} completion tokens",
+            f"  •  Turn: {cfg.prompt_tokens} prompt + {cfg.completion_per_turn} completion tokens",
             "Objectives: Turn Cost ↓  Context ↑  Cache Read $/M ↓  Completion $/M ↓",
         ],
         footer=f"{OPTIMAL} marks models no other model beats on cost, context, and cache pricing simultaneously.",
@@ -253,7 +253,7 @@ def build_model_candidates(cfg: ScoringConfig) -> List[ModelCandidate]:
                 completion_price_per_m=compl,
                 cache_read_price_per_m=read,
                 context_length=ctx,
-                turn_cost_usd=(cfg.prompt_tokens * prompt + cfg.completion_tokens * compl) / 1e6,
+                turn_cost_usd=(cfg.prompt_tokens * prompt + cfg.completion_per_turn * compl) / 1e6,
             )
         )
     return out

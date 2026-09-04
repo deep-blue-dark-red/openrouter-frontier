@@ -117,7 +117,7 @@ def route(
     """
     cfg = config or ScoringConfig()
     catalog, raw_bench = load_data(force_refresh)
-    candidates = build_candidates(catalog, raw_bench, metric, price_source, cfg.prompt_tokens, cfg.completion_tokens)
+    candidates = build_candidates(catalog, raw_bench, metric, price_source, cfg.prompt_tokens, cfg.completion_per_turn)
     qualifying = rank_candidates([c for c in candidates if c["score"] >= min_score], mode)
 
     skipped: List[str] = []

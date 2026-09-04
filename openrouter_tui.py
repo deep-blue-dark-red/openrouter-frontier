@@ -318,7 +318,7 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
     write(help_line([("Enter", "provider detail"), ("Tab", "toggle quants"), ("↑/↓", "move"), ("Esc", "back")], width - 1))
     cfg = ScoringConfig()
     sys.stdout.write(
-        f"Ranked by expected task cost: {cfg.n_turns} turns × ({cfg.new_tokens_per_turn}+{cfg.completion_tokens} tok) "
+        f"Ranked by expected task cost: {cfg.n_turns} turns × ({cfg.new_tokens_per_turn}+{cfg.completion_per_turn} tok) "
         f"→ {cfg.transcript_tokens // 1000}k, time ${cfg.time_value_usd_per_hour:.0f}/hr, {cfg.routing} routing. #1 is cheapest."[: width - 1]
     )
     sys.stdout.flush()

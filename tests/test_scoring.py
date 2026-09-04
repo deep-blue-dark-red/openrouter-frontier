@@ -57,21 +57,21 @@ def test_worked_example_numbers():
 
 
 def test_quadratic_in_turns_and_linear_term_only_at_one_turn():
-    cfg1 = ScoringConfig(turns=1, time_value_usd_per_hour=0, routing="order", price_failures=False)
+    cfg1 = ScoringConfig(turns=1, completion_tokens=500, time_value_usd_per_hour=0, routing="order", price_failures=False)
     sb1 = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=0.5, uptime_pct=100), cfg1)
     # one turn: no prefix, so only new tokens (at write=input price) and output
     assert math.isclose(sb1.task_cost_usd, (2000 * 0.075 + 500 * 0.25) / 1e6)
     assert sb1.read_baseline_usd == 0 and sb1.miss_premium_usd == 0
     # doubling N roughly quadruples the prefix terms
-    c100 = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=0.5, uptime_pct=100), ScoringConfig(turns=100, time_value_usd_per_hour=0, price_failures=False))
-    c200 = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=0.5, uptime_pct=100), ScoringConfig(turns=200, time_value_usd_per_hour=0, price_failures=False))
+    c100 = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=0.5, uptime_pct=100), ScoringConfig(turns=100, completion_tokens=500, time_value_usd_per_hour=0, price_failures=False))
+    c200 = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=0.5, uptime_pct=100), ScoringConfig(turns=200, completion_tokens=500, time_value_usd_per_hour=0, price_failures=False))
     ratio = (c200.read_baseline_usd + c200.miss_premium_usd) / (c100.read_baseline_usd + c100.miss_premium_usd)
     assert math.isclose(ratio, 199 * 200 / (99 * 100))
 
 
 def test_new_tokens_never_cached():
     """A hit rate of 1 still pays the write price on the a new tokens each turn."""
-    cfg = ScoringConfig(turns=10, time_value_usd_per_hour=0, price_failures=False)
+    cfg = ScoringConfig(turns=10, completion_tokens=500, time_value_usd_per_hour=0, price_failures=False)
     sb = evaluate_endpoint(GLM, EndpointInputs(cache_hit_rate=1.0, uptime_pct=100), cfg)
     assert math.isclose(sb.fixed_cost_usd, 10 * (2000 * 0.075 + 500 * 0.25) / 1e6)
     assert sb.miss_premium_usd == 0.0
@@ -81,8 +81,8 @@ def test_new_tokens_never_cached():
 def test_three_prices_and_miss_policy():
     pr = EndpointPricing(prompt=1.0, completion=0.0, input_cache_read=0.1, input_cache_write=1.25)
     inp = EndpointInputs(cache_hit_rate=0.0, uptime_pct=100)
-    rewrite = evaluate_endpoint(pr, inp, ScoringConfig(turns=2, time_value_usd_per_hour=0, price_failures=False, miss_policy="rewrite"))
-    process = evaluate_endpoint(pr, inp, ScoringConfig(turns=2, time_value_usd_per_hour=0, price_failures=False, miss_policy="process"))
+    rewrite = evaluate_endpoint(pr, inp, ScoringConfig(turns=2, completion_tokens=500, time_value_usd_per_hour=0, price_failures=False, miss_policy="rewrite"))
+    process = evaluate_endpoint(pr, inp, ScoringConfig(turns=2, completion_tokens=500, time_value_usd_per_hour=0, price_failures=False, miss_policy="process"))
     assert rewrite.miss_price == 1.25 and process.miss_price == 1.0
     assert rewrite.write_price == 1.25 and rewrite.read_price == 0.1 and rewrite.input_price == 1.0
     # turn 2 prefix of 2500 tokens, all missed: 1.25 vs 1.0 $/M
@@ -105,14 +105,28 @@ def test_cache_modes():
     assert cold.task_cost_usd > asm.task_cost_usd > agg.task_cost_usd
 
 
+def test_cache_miss_costs_prefill_time():
+    # $3600/hr => $1/s. Decode 50 tps, prefill 100x => 5000 tok/s. h = 0: every turn re-prefills its prefix.
+    pr = EndpointPricing(prompt=0.0, completion=0.0, input_cache_read=0.0)
+    inp = EndpointInputs(cache_hit_rate=0.0, uptime_pct=100, ttft_p50=0.0, tps_p50=50.0)
+    cfg = ScoringConfig(new_tokens_per_turn=5000, completion_tokens=0, turns=3, time_value_usd_per_hour=3600.0,
+                        price_failures=False, prefill_multiplier=100.0)
+    sb = evaluate_endpoint(pr, inp, cfg)
+    # prefixes 0, 5000, 10000 tokens => 0 + 1 + 2 seconds of prefill
+    assert math.isclose(sb.time_cost_usd, 3.0)
+    warm = evaluate_endpoint(pr, EndpointInputs(cache_hit_rate=1.0, uptime_pct=100, ttft_p50=0.0, tps_p50=50.0), cfg)
+    assert warm.time_cost_usd == 0.0
+    assert sb.prefill_tps == 5000.0
+
+
 def test_time_cost_uses_lognormal_means_and_seconds_per_token():
     # p90 twice the median => sigma = ln2/1.2816, mean = median*exp(sigma^2/2)
     sigma = math.log(2) / 1.2815515655446004
-    inp = EndpointInputs(cache_hit_rate=0.0, uptime_pct=100, ttft_p50=1.0, ttft_p90=2.0, tps_p50=50.0, tps_p90=100.0)
+    inp = EndpointInputs(cache_hit_rate=1.0, uptime_pct=100, ttft_p50=1.0, ttft_p90=2.0, tps_p50=50.0, tps_p90=100.0)
     assert math.isclose(inp.expected_ttft, math.exp(sigma ** 2 / 2))
     assert math.isclose(inp.expected_seconds_per_token, (1 / 50) * math.exp(sigma ** 2 / 2))
     cfg = ScoringConfig(turns=4, completion_tokens=100, new_tokens_per_turn=0, time_value_usd_per_hour=3600.0, price_failures=False)
-    sb = evaluate_endpoint(EndpointPricing(prompt=0.0, completion=0.0), inp, cfg)
+    sb = evaluate_endpoint(EndpointPricing(prompt=0.0, completion=0.0, input_cache_read=0.0), inp, cfg)
     assert math.isclose(sb.time_cost_usd, 4 * (inp.expected_ttft + 100 * inp.expected_seconds_per_token))
 
 
@@ -125,10 +139,12 @@ def test_failure_cold_retry_and_return_penalty():
     q = 0.1
     # turn 1: S=0. ok: 1.0 + 2s; fail: wasted 2s + cold 1.0 + 2s.
     # turn 2: S=1M. ok: 1.0 new + 0 read + 2s; fail: 2s + (1.0 + 1.0 cold prefix) + 2s; no return penalty on last turn
-    expect = ((1 - q) * (1.0 + 2) + q * (2 + 1.0 + 2)) + ((1 - q) * (1.0 + 2) + q * (2 + 2.0 + 2))
-    expect += q * 1.0 * (1.0 - 0.0) * 1e6 / 1e6 * 1  # return penalty at turn 1 only: h(m-r)d = 1*(1e-6-0)*1e6 = 1.0
+    # turn 2 cold retry also re-prefills the 1M-token prefix at 100 x 50 = 5000 tok/s = 200 s
+    expect = ((1 - q) * (1.0 + 2) + q * (2 + 1.0 + 2)) + ((1 - q) * (1.0 + 2) + q * (2 + 2.0 + 2 + 200))
+    # return penalty at turn 1 only: h (m - r + v'/prefill) d = 1 * (1e-6 + 1/5000) * 1e6 = 1 + 200
+    expect += q * (1.0 + 200.0)
     assert math.isclose(sb.task_cost_usd, expect)
-    assert math.isclose(sb.return_penalty_usd, q * 1.0)
+    assert math.isclose(sb.return_penalty_usd, q * 201.0)
 
 
 def test_impute_missing_takes_worst_observed():
@@ -143,8 +159,8 @@ def test_impute_missing_takes_worst_observed():
 
 def test_parameter_sigma_scales_as_n_squared():
     inp = EndpointInputs(cache_hit_rate=0.8, uptime_pct=100)
-    s1 = evaluate_endpoint(GLM, inp, ScoringConfig(turns=100, sigma_h=0.03, time_value_usd_per_hour=0, price_failures=False)).sigma_par_usd
-    s2 = evaluate_endpoint(GLM, inp, ScoringConfig(turns=200, sigma_h=0.03, time_value_usd_per_hour=0, price_failures=False)).sigma_par_usd
+    s1 = evaluate_endpoint(GLM, inp, ScoringConfig(turns=100, completion_tokens=500, sigma_h=0.03, time_value_usd_per_hour=0, price_failures=False)).sigma_par_usd
+    s2 = evaluate_endpoint(GLM, inp, ScoringConfig(turns=200, completion_tokens=500, sigma_h=0.03, time_value_usd_per_hour=0, price_failures=False)).sigma_par_usd
     assert math.isclose(s2 / s1, 199 * 200 / (99 * 100))
     # sigma_par = sigma_h (m-r) sum S_k
     assert math.isclose(s1, 0.03 * (0.075 - 0.015) / 1e6 * 2500 * 100 * 99 / 2)
@@ -159,8 +175,11 @@ def test_objective_adds_risk_terms():
 
 def test_config_defaults_and_validation():
     cfg = ScoringConfig()
-    assert cfg.time_value_usd_per_hour == 20.0 and cfg.task_tokens == 300_000
-    assert cfg.n_turns == 120 and cfg.routing == "sticky"
+    assert cfg.time_value_usd_per_hour == 20.0 and cfg.task_tokens == 300_000 and cfg.output_tokens == 10_000
+    # N = (300k - 10k) / 2000 = 145 turns; o = 10k / 145 = 69 per turn
+    assert cfg.n_turns == 145 and cfg.completion_per_turn == 69 and cfg.routing == "sticky"
+    assert ScoringConfig(completion_tokens=500).n_turns == 120
+    assert ScoringConfig(turns=50).completion_per_turn == 200
     with pytest.raises(ValueError):
         ScoringConfig(new_tokens_per_turn=-1)
     with pytest.raises(ValueError):
