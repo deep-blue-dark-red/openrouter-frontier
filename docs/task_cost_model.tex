@@ -100,11 +100,15 @@ $g^{50}_e, g^{90}_e$ & output throughput, tokens/s & 5 min rolling & \texttt{p50
 \bottomrule
 \end{tabular}
 \end{center}
-OpenRouter's percentile convention is that the stated fraction of requests
-\emph{performs better} than the value: $\ell^{90}$ is a latency that 90\% of
-requests beat, so it is the slow tail, and $g^{90}$ is a throughput that 90\% of
-requests exceed, so it is also the slow tail. The percentiles summarise a
-five-minute window while the rates summarise a day; the model treats both as
+Two percentile conventions are in play. OpenRouter's routing documentation
+defines a p90 threshold as a value that 90\% of requests \emph{beat}. The
+model-page statistics the tools read, however, are plain distribution
+percentiles: $\ell^{90} > \ell^{50}$ is the slow latency tail and
+$g^{90} > g^{50}$ is the \emph{fast} throughput tail (for GLM 5.3 Flash on
+2026-09-04, $g^{50} = 23.5$ and $g^{90} = 47$ tokens/s on one endpoint). The
+fits in Section~\ref{sec:inputs} use the absolute log-ratio of the two
+quantiles, which is the same under either convention. The percentiles summarise
+a five-minute window while the rates summarise a day; the model treats both as
 current.
 
 \subsection{Caller parameters}
@@ -113,8 +117,9 @@ current.
 \toprule
 Symbol & Meaning & Default \\
 \midrule
-$N, a, o$ & task profile & profile-dependent \\
-$v$ & value of the caller's time, USD per hour & $0$ \\
+$a, o$ & new and completion tokens per turn & $2000$, $500$ \\
+$N$ & turns; default grows the transcript to $3 \times 10^5$ tokens & $120$ \\
+$v$ & value of the caller's time, USD per hour & $20$ \\
 $\rho$ & routing policy: \textsf{order} or \textsf{sticky} & \textsf{sticky} (OpenRouter default) \\
 $(e_1, \dots, e_m)$ & fallback chain; $e_1$ is the scored endpoint & $(e_1, B)$, $B$ a cold outside option \\
 miss policy & prefix on a miss \emph{rewritten} ($m = w$) or \emph{processed} ($m = b$) & rewritten \\
@@ -215,13 +220,15 @@ a lognormal to each: with median $\ell^{50}$ and 90th percentile $\ell^{90}$,
   \qquad \Phi^{-1}(0.9) = 1.2816 .
 \end{equation}
 Generation time is linear in seconds per token $s = 1/g$, not in $g$, so the
-fit is on $s$. By the percentile convention $g^{90} \le g^{50}$, and the
-90th percentile of $s$ is $1 / g^{90}$:
+fit is on $s$. The published throughput quantile may be the fast or the slow
+tail depending on the source (Section~1.3); the lognormal is symmetric in
+$\ln s$, so either decile identifies $\sigma_s$:
 \begin{equation}\label{eq:lognormal-s}
-  \sigma_s = \frac{\ln(g^{50} / g^{90})}{\Phi^{-1}(0.9)},
+  \sigma_s = \frac{\big|\ln(g^{90} / g^{50})\big|}{\Phi^{-1}(0.9)},
   \qquad
   \E[s] = \frac{1}{g^{50}} \exp\!\big(\sigma_s^2 / 2\big).
 \end{equation}
+Latency is treated the same way, $\sigma_\ell = |\ln(\ell^{90}/\ell^{50})| / \Phi^{-1}(0.9)$.
 When only a median is published, $\sigma = 0$ and the median is used. Both
 expectations are increasing in the tail width, so a wider tail can only make an
 endpoint look worse.
@@ -553,7 +560,13 @@ $R_j$ this is still $O(N^2)$; if recovery scales with task length it is
 $O(N^3)$; \textsf{sticky} migration is the case $R_j = N - t_j$ with the
 fallback's prices substituted.
 
-\section{Reporting}
+\section{Reporting and implementation}
+
+The model is implemented in \texttt{openrouter\_frontier/scoring.py}: the expectation,
+decomposition, bounds, and both routing policies are evaluated turn by turn (the loop is
+exact and needs no geometric-sum special cases), and the test suite checks the
+implementation against the closed forms \eqref{eq:task-mean} and \eqref{eq:sticky} and
+the worked example above. The default profile is the one in Section~1.4.
 
 The unit of optimisation is the task. For each endpoint the tools should report
 \begin{itemize}

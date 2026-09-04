@@ -10,7 +10,7 @@ from .client import (
 from .models import ModelStats, ProviderStats
 from .pareto import Objective, annotate_frontier, cost_quality_frontier, pareto_mask
 from .resolver import ModelResolutionError, get_all_models, resolve_model, search_models
-from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
+from .scoring import EndpointInputs, EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint, impute_missing
 
 __version__ = "0.2.0"
 __all__ = [
@@ -29,8 +29,10 @@ __all__ = [
     "get_all_models",
     "resolve_model",
     "search_models",
+    "EndpointInputs",
     "EndpointPricing",
     "ScoreBreakdown",
     "ScoringConfig",
     "evaluate_endpoint",
+    "impute_missing",
 ]

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
+from .scoring import EndpointInputs, EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint, impute_missing
 
 
 def format_tokens(n: int) -> str:
@@ -89,17 +89,31 @@ class ProviderStats:
     def formatted_uptime(self) -> str:
         return _fmt_pct(self.uptime_1d_pct)
 
-    def evaluate_score(self, config: Optional[ScoringConfig] = None) -> Optional[ScoreBreakdown]:
-        """Score this endpoint with the ProviderScore model. ``None`` if pricing is unknown."""
+    def scoring_inputs(self) -> EndpointInputs:
+        """Raw telemetry in the scorer's units (seconds, tokens/s, percent)."""
+        ms = lambda v: v / 1000.0 if v is not None else None
+        return EndpointInputs(
+            cache_hit_rate=self.cache_hit_rate,
+            uptime_pct=self.uptime_1d_pct,
+            ttft_p50=ms(self.latency_p50_ms),
+            ttft_p90=ms(self.latency_p90_ms),
+            tps_p50=self.throughput_p50_tps,
+            tps_p90=self.throughput_p90_tps,
+        )
+
+    def evaluate_score(
+        self, config: Optional[ScoringConfig] = None, inputs: Optional[EndpointInputs] = None
+    ) -> Optional[ScoreBreakdown]:
+        """Expected task cost on this endpoint. ``None`` if pricing is unknown.
+
+        Called directly, missing telemetry is *not* imputed (there is nothing to impute
+        from); use :meth:`ModelStats.score_providers` for the worst-case imputation.
+        """
         if not self.pricing:
             return None
-        ttft = self.latency_p50_ms / 1000.0 if self.latency_p50_ms is not None else None
         return evaluate_endpoint(
             pricing=self.pricing,
-            cache_hit_rate=self.cache_hit_rate,
-            ttft_seconds=ttft,
-            throughput_tps=self.throughput_p50_tps,
-            uptime_pct=self.uptime_1d_pct,
+            inputs=inputs or self.scoring_inputs(),
             config=config or ScoringConfig(),
             provider_name=self.name,
             provider_slug=self.slug,
@@ -217,9 +231,15 @@ class ModelStats:
         return None
 
     def score_providers(self, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
-        """Score every provider and return them ranked by total cost, cheapest first."""
-        scores = [sb for sb in (p.evaluate_score(config) for p in self.providers) if sb is not None]
-        scores.sort(key=lambda s: s.total_cost_usd)
+        """Score every provider and rank by the objective (expected task cost plus any risk
+        terms), cheapest first. Missing telemetry is imputed as the worst observed value
+        among this model's endpoints before scoring (paper, Assumption 5)."""
+        cfg = config or ScoringConfig()
+        priced = [p for p in self.providers if p.pricing]
+        inputs = [p.scoring_inputs() for p in priced]
+        impute_missing(inputs)
+        scores = [sb for sb in (p.evaluate_score(cfg, inp) for p, inp in zip(priced, inputs)) if sb is not None]
+        scores.sort(key=lambda s: s.objective_usd)
         for idx, s in enumerate(scores, 1):
             s.rank = idx
         return scores
@@ -240,11 +260,12 @@ class ModelStats:
         f = field.lower()
 
         if f in ("score", "cost", "total_cost", "token_cost", "tokencost"):
-            attr = "token_cost_usd" if f.startswith("token") else "total_cost_usd"
+            attr = "token_cost_usd" if f.startswith("token") else "task_cost_usd"
             cache: Dict[str, Optional[float]] = {}
+            for sb in self.score_providers(config):
+                cache[sb.endpoint_id] = getattr(sb, attr)
             for p in self.providers:
-                sb = p.evaluate_score(config)
-                cache[p.endpoint_id] = getattr(sb, attr) if sb else None
+                cache.setdefault(p.endpoint_id, None)
             key: Callable[[ProviderStats], Any] = lambda p: cache[p.endpoint_id]
             desc_default = False
         else:

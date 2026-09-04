@@ -17,7 +17,8 @@ from openrouter_frontier._util import filter_primary_quantization
 from openrouter_frontier.client import score_model_providers
 from openrouter_frontier.render import Column, fmt_pct, fmt_seconds, fmt_tps, print_table
 from openrouter_frontier.resolver import resolve_model
-from openrouter_frontier.scoring import EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
+from openrouter_frontier.profile_args import add_task_args, config_from_args, describe_profile
+from openrouter_frontier.scoring import EndpointInputs, EndpointPricing, ScoreBreakdown, ScoringConfig, evaluate_endpoint
 
 
 def evaluate_provider_utility(
@@ -27,18 +28,16 @@ def evaluate_provider_utility(
     cache_write_price_per_m: Optional[float] = None,
     request_fee: float = 0.0,
     cache_hit_rate: Optional[float] = None,
-    total_tokens_served: int = 0,
     ttft_seconds: Optional[float] = None,
+    ttft_p90_seconds: Optional[float] = None,
     throughput_tps: Optional[float] = None,
+    throughput_p90_tps: Optional[float] = None,
     uptime_pct: Optional[float] = None,
-    prompt_tokens: int = 2000,
-    completion_tokens: int = 500,
-    time_value_usd_per_hour: float = 0.0,
-    price_failures: bool = True,
+    config: Optional[ScoringConfig] = None,
     provider_name: str = "Unknown",
     provider_slug: str = "unknown",
 ) -> ScoreBreakdown:
-    """Score a single hypothetical provider from raw numbers, without touching the network.
+    """Score a single hypothetical endpoint from raw numbers, without touching the network.
 
     Prices are USD per million tokens; ``cache_hit_rate`` is 0..1; ``uptime_pct`` is 0..100.
     """
@@ -49,96 +48,89 @@ def evaluate_provider_utility(
         input_cache_write=cache_write_price_per_m,
         request_fee=request_fee,
     )
-    config = ScoringConfig(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        time_value_usd_per_hour=time_value_usd_per_hour,
-        price_failures=price_failures,
+    inputs = EndpointInputs(
+        cache_hit_rate=cache_hit_rate, uptime_pct=uptime_pct,
+        ttft_p50=ttft_seconds, ttft_p90=ttft_p90_seconds,
+        tps_p50=throughput_tps, tps_p90=throughput_p90_tps,
     )
     return evaluate_endpoint(
-        pricing=pricing,
-        cache_hit_rate=cache_hit_rate,
-        ttft_seconds=ttft_seconds,
-        throughput_tps=throughput_tps,
-        uptime_pct=uptime_pct,
-        config=config,
-        provider_name=provider_name,
-        provider_slug=provider_slug,
+        pricing=pricing, inputs=inputs, config=config or ScoringConfig(),
+        provider_name=provider_name, provider_slug=provider_slug,
     )
 
 
 def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringConfig, quant_desc: str) -> None:
     show_time = cfg.time_value_usd_per_hour > 0
-    cols = [Column("Provider", 16), Column("Scored $/M", 12, ">"), Column("Token $/M", 11, ">")]
+    show_obj = cfg.lambda_proc > 0 or cfg.lambda_par > 0
+    cols = [Column("Provider", 16), Column("Task $", 10, ">")]
+    if show_obj:
+        cols.append(Column("Objective", 10, ">"))
+    cols.append(Column("Tokens $", 9, ">"))
     if show_time:
-        cols.append(Column("Time $/M", 11, ">"))
+        cols.append(Column("Time $", 9, ">"))
     if cfg.price_failures:
-        cols.append(Column("Fail $/M", 10, ">"))
+        cols.append(Column("Fail $", 8, ">"))
     cols += [
+        Column("Miss $", 8, ">"),
         Column("CacheHit", 8, ">"),
-        Column("Hit $/M", 8, ">"),
-        Column("Miss $/M", 9, ">"),
-        Column("Latency", 8, ">"),
+        Column("E[TTFT]", 8, ">"),
         Column("TPS", 5, ">"),
         Column("Uptime", 7, ">"),
+        Column("Read $/M", 9, ">"),
+        Column("Miss $/M", 9, ">"),
+        Column("$/M", 8, ">"),
     ]
 
     rows = []
     for r in results:
-        row = [r.provider_name, r.formatted_total_cost, r.formatted_token_cost]
+        row = [r.provider_name + ("*" if r.imputed else ""), r.formatted_task_cost]
+        if show_obj:
+            row.append(r.formatted_objective)
+        row.append(r.formatted_token_cost)
         if show_time:
             row.append(r.formatted_time_cost)
         if cfg.price_failures:
             row.append(r.formatted_failure_cost)
         row += [
+            r.formatted_miss_premium,
             r.formatted_cache_hit_rate,
-            f"${r.hit_price:.4f}",
-            f"${r.miss_price:.4f}",
             fmt_seconds(r.ttft_seconds),
             fmt_tps(r.throughput_tps),
             fmt_pct(r.uptime_pct),
+            f"${r.read_price:.4f}",
+            f"${r.miss_price:.4f}",
+            f"${r.task_cost_per_m:.4f}",
         ]
         rows.append(row)
 
-    mode = "Pure Token Cost" if not show_time and not cfg.price_failures else "Full Utility Model"
+    footer = ("Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. "
+              "Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). "
+              "CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.")
+    if any(r.imputed for r in results):
+        footer += " * = missing telemetry imputed as the worst observed for this model."
     print_table(
         cols,
         rows,
-        title=f"ProviderScore Evaluation: {model_name}",
-        subtitle_lines=[
-            f"Mode: {mode}  •  Turn: {cfg.prompt_tokens} prompt + {cfg.completion_tokens} completion tokens"
-            f"  •  Time Value: ${cfg.time_value_usd_per_hour:.2f}/hr",
-            f"Discounts: {'Applied' if cfg.apply_discount else 'List Price'}"
-            f"  •  Failure Risk: {'Yes' if cfg.price_failures else 'No'}  •  {quant_desc}",
-        ],
-        footer="Lower Scored $/M is better. CacheHit is the published 24h token-weighted cache hit rate.",
+        title=f"ProviderScore Task Cost: {model_name}",
+        subtitle_lines=[describe_profile(cfg), quant_desc],
+        footer=footer,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Rank OpenRouter providers for a model by ProviderScore expected cost per turn.",
+        description="Rank OpenRouter providers for a model by the expected cost of a whole task (ProviderScore).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("model", nargs="?", default="z-ai/glm-5.3-flash", help="Model slug or shorthand")
-    parser.add_argument("-c", "--prompt-tokens", type=int, default=2000, help="Prompt tokens per turn (C)")
-    parser.add_argument("-o", "--completion-tokens", type=int, default=500, help="Completion tokens per turn (O)")
-    parser.add_argument("-t", "--time-value", type=float, default=0.0, help="Time value in USD/hr (0 = pure token cost)")
-    parser.add_argument("--no-failures", action="store_true", help="Disable uptime failure-risk pricing")
-    parser.add_argument("--no-discount", action="store_true", help="Use list pricing, ignoring endpoint discounts")
+    add_task_args(parser)
     parser.add_argument("--all-quants", action="store_true", help="Include all quantizations (default: primary fp8 variant only)")
     parser.add_argument("-n", "--top", type=int, default=10, help="Number of providers to display")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args()
 
     model_id, canonical_slug, display_name = resolve_model(args.model)
-    cfg = ScoringConfig(
-        prompt_tokens=args.prompt_tokens,
-        completion_tokens=args.completion_tokens,
-        time_value_usd_per_hour=args.time_value,
-        price_failures=not args.no_failures,
-        apply_discount=not args.no_discount,
-    )
+    cfg = config_from_args(args)
 
     results = score_model_providers(canonical_slug, config=cfg)
     results = filter_primary_quantization(results, args.all_quants)[: args.top]

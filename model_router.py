@@ -29,6 +29,7 @@ from model_frontier import build_candidates, load_data
 from openrouter_frontier._util import filter_primary_quantization
 from openrouter_frontier.client import score_model_providers
 from openrouter_frontier.pareto import annotate_frontier, cost_quality_frontier, frontier_sort_key
+from openrouter_frontier.profile_args import add_task_args, config_from_args
 from openrouter_frontier.scoring import ScoreBreakdown, ScoringConfig
 
 
@@ -44,7 +45,7 @@ class Route:
     score: float
     model_cost: float          # model-level price used for ranking, see ``cost_unit``
     cost_unit: str
-    provider: ScoreBreakdown   # best endpoint by ProviderScore scored cost per turn
+    provider: ScoreBreakdown   # best endpoint by ProviderScore expected task cost
     skipped: List[str] = field(default_factory=list)  # cheaper qualifying models with no active provider
 
     def to_dict(self) -> Dict[str, Any]:
@@ -61,8 +62,10 @@ class Route:
             "provider": p.provider_name,
             "provider_slug": p.provider_slug,
             "endpoint_id": p.endpoint_id,
-            "scored_cost_per_m": p.total_cost_per_m,
-            "token_cost_per_m": p.token_cost_per_m,
+            "task_cost_usd": p.task_cost_usd,
+            "objective_usd": p.objective_usd,
+            "token_cost_usd": p.token_cost_usd,
+            "task_cost_per_m": p.task_cost_per_m,
             "quantization": p.quantization,
             "uptime_pct": p.uptime_pct,
             "ttft_seconds": p.ttft_seconds,
@@ -146,21 +149,13 @@ def main() -> None:
         "--price-source", choices=["list", "weighted", "call"], default="list",
         help="list = catalog prompt $/1M; weighted = traffic-weighted effective prompt $/1M; call = per-turn estimate",
     )
-    parser.add_argument("-c", "--prompt-tokens", type=int, default=2000, help="Prompt tokens per turn")
-    parser.add_argument("-o", "--completion-tokens", type=int, default=500, help="Completion tokens per turn")
-    parser.add_argument("--time-value", type=float, default=0.0, help="Value of your time in $/hour (0 disables)")
-    parser.add_argument("--no-failures", action="store_true", help="Do not charge for expected retries")
+    add_task_args(parser)
     parser.add_argument("--all-quants", action="store_true", help="Consider non-primary quantization variants")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     parser.add_argument("--refresh", action="store_true", help="Bypass the 1-hour cache")
     args = parser.parse_args()
 
-    cfg = ScoringConfig(
-        prompt_tokens=args.prompt_tokens,
-        completion_tokens=args.completion_tokens,
-        time_value_usd_per_hour=args.time_value,
-        price_failures=not args.no_failures,
-    )
+    cfg = config_from_args(args)
     r = route(args.min_score, args.metric, args.mode, args.price_source, cfg, args.all_quants, args.refresh)
 
     if args.json:
@@ -173,7 +168,9 @@ def main() -> None:
     print(f"Model:     {r.model_name} ({r.model_id})")
     print(f"Score:     {r.score:.1f} {r.metric}  (required >= {args.min_score:g}, mode: {r.mode})")
     print(f"Price:     ${r.model_cost:.4f} {r.cost_unit}")
-    print(f"Provider:  {p.provider_name} [{p.quantization}]  {p.formatted_total_cost}/M scored, {p.formatted_token_cost}/M tokens")
+    print(f"Provider:  {p.provider_name} [{p.quantization}]  {p.formatted_task_cost} per task "
+          f"({p.formatted_token_cost} tokens + {p.formatted_time_cost} time + {p.formatted_failure_cost} failures; "
+          f"{p.turns} turns, routing {p.routing})")
     if r.skipped:
         print(f"Skipped:   {', '.join(r.skipped)} (no active providers)")
 

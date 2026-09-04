@@ -206,15 +206,15 @@ MODEL_STATUS_COL = Column("Status", 14)
 MODEL_ID_COL = Column("Model ID", 30)
 PROVIDER_COLS = [
     Column("Provider", 16),
-    Column("Scored $/M", 12, ">"),
-    Column("Token $/M", 11, ">"),
-    Column("Fail $/M", 10, ">"),
+    Column("Task $", 9, ">"),
+    Column("Tokens $", 9, ">"),
+    Column("Time $", 9, ">"),
+    Column("Miss $", 8, ">"),
     Column("CacheHit", 8, ">"),
-    Column("Latency", 8, ">"),
+    Column("E[TTFT]", 8, ">"),
     Column("TPS", 5, ">"),
     Column("Uptime", 7, ">"),
-    Column("Hit $/M", 9, ">"),
-    Column("Miss $/M", 9, ">"),
+    Column("$/M", 8, ">"),
 ]
 
 
@@ -301,9 +301,9 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
             s = active[i]
             line = format_row(
                 [
-                    s.provider_name[:16], s.formatted_total_cost, s.formatted_token_cost, s.formatted_failure_cost,
-                    s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds), fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct),
-                    f"${s.hit_price:.4f}", f"${s.miss_price:.4f}",
+                    s.provider_name[:16], s.formatted_task_cost, s.formatted_token_cost, s.formatted_time_cost,
+                    s.formatted_miss_premium, s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds),
+                    fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct), f"${s.task_cost_per_m:.4f}",
                 ],
                 PROVIDER_COLS,
             )[: width - 1]
@@ -316,7 +316,11 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
 
     write()
     write(help_line([("Enter", "provider detail"), ("Tab", "toggle quants"), ("↑/↓", "move"), ("Esc", "back")], width - 1))
-    sys.stdout.write("Ranked by scored cost per 1M tok on a 2000 prompt + 500 completion turn. #1 is cheapest."[: width - 1])
+    cfg = ScoringConfig()
+    sys.stdout.write(
+        f"Ranked by expected task cost: {cfg.n_turns} turns × ({cfg.new_tokens_per_turn}+{cfg.completion_tokens} tok) "
+        f"→ {cfg.transcript_tokens // 1000}k, time ${cfg.time_value_usd_per_hour:.0f}/hr, {cfg.routing} routing. #1 is cheapest."[: width - 1]
+    )
     sys.stdout.flush()
     return active, idx, scroll
 
@@ -326,15 +330,18 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     rule = "─" * min(width - 1, 78)
     write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})")
     write(rule)
-    write(f"  Scored Cost (per 1M tok):   \x1b[1;32m{s.formatted_total_cost}{RESET}")
-    write(f"  Token Cost (per 1M tok):    {s.formatted_token_cost}")
-    write(f"  Failure Risk (per 1M tok):  {s.formatted_failure_cost}")
-    write(f"  Time Cost (per 1M tok):     {s.formatted_time_cost}")
-    write(f"  Prompt Cache Hit Rate (24h): {BOLD}{s.formatted_cache_hit_rate}{RESET}")
-    write(f"  Cache Read (Hit) Price:     ${s.hit_price:.4f} per 1M tok")
-    write(f"  Cache Write/Miss Price:     ${s.miss_price:.4f} per 1M tok")
-    write(f"  Completion Price:           ${s.out_price:.4f} per 1M tok")
-    write(f"  Latency (TTFT):             {fmt_seconds(s.ttft_seconds)}  |  Throughput: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
+    write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
+    write(f"  Expected Task Cost:         \x1b[1;32m{s.formatted_task_cost}{RESET}   (per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
+    write(f"    fixed (new tok + output):  {_usd(s.fixed_cost_usd)}")
+    write(f"    time:                      {_usd(s.time_cost_usd)}")
+    write(f"    cached-read baseline:      {_usd(s.read_baseline_usd)}")
+    write(f"    cache-miss premium:        {_usd(s.miss_premium_usd)}")
+    write(f"    failure premium + return:  {_usd(s.failure_premium_usd + s.return_penalty_usd)}")
+    write(f"  Bounds: perfect cache {_usd(s.perfect_cache_cost_usd)}  |  cold cache {_usd(s.cold_cache_cost_usd)}")
+    write(f"  Risk: σ_proc {_usd(s.sigma_proc_usd)}  |  σ_par {_usd(s.sigma_par_usd)}  |  P(migrate to fallback) {s.migration_probability:.0%}")
+    write(f"  Cache Hit Rate (24h):       {BOLD}{s.formatted_cache_hit_rate}{RESET}" + (f"   imputed: {', '.join(s.imputed)}" if s.imputed else ""))
+    write(f"  Prices per 1M tok:          input ${s.input_price:.4f}  |  read ${s.read_price:.4f}  |  write ${s.write_price:.4f}  |  miss ${s.miss_price:.4f}  |  out ${s.out_price:.4f}")
+    write(f"  E[TTFT]: {fmt_seconds(s.ttft_seconds)}  |  Throughput p50: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
     write(f"  Quantization Variant:       {s.quantization.upper()}")
     write(rule)
     write(help_line([("Any key", "back to providers")], width - 1))

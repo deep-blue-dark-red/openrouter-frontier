@@ -1,6 +1,6 @@
 # OpenRouter Frontier
 
-**The price of an LLM call is not the list price. It is the expected cost of the turn, and
+**The price of an LLM call is not the list price. It is the expected cost of the whole task, and
 that depends on who serves it.** Two providers selling the same model at the same price can
 differ by 25% in what you actually pay, because one hits the prompt cache 88% of the time and
 the other under 50%, one drops one request in ten and throws away your cached prefix, one makes
@@ -8,13 +8,16 @@ you wait four seconds for the first token. Nobody prices that. This does.
 
 OpenRouter Frontier pulls the observed 24-hour metrics for every endpoint serving a model —
 prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
-**pricing** — and turns them into a single expected cost per turn, then reasons about it:
+**pricing** — and turns them into the expected cost of a whole multi-turn task, then reasons about it:
 
-- **ProviderScore scoring** – the expected dollars a conversation turn costs on each endpoint:
-  cache economics from each endpoint's observed 24-hour hit rate, a value-of-time term, and
-  the cost of retrying a failed request. Reported per 1M tokens so it sits on the same scale as
-  list prices, and often reorders them. The full model is in [Scoring model](#scoring-model).
-- **Pareto frontiers** – which providers are non-dominated across cost, latency, throughput,
+- **ProviderScore** – the expected dollars a whole task costs on each endpoint. A task is $N$
+  turns whose transcript is resubmitted every turn, so the growing prefix is paid $N$ times:
+  cache economics from the endpoint's observed 24-hour hit rate, the value of your time waiting
+  on its latency and throughput, and what a failure costs when the task is retried cold on a
+  fallback. The default profile is a 300k-token task with time valued at $20/hr. The full model
+  is in [Scoring model](#scoring-model) and derived in
+  [docs/task_cost_model.tex](docs/task_cost_model.tex).
+- **Pareto frontiers** – which providers are non-dominated across task cost, latency, throughput,
   cache hit and uptime at once, and which models no cheaper model out-scores on benchmark
   quality, with the **efficient point** where marginal quality per dollar starts to fall off.
 - **Routing** – "I need at least this much intelligence": the model and provider to call, chosen
@@ -66,51 +69,58 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
   gain per dollar), and `-N pts` a dominated model's score gap. Type to filter (`zai`,
   `claude37`, `gemini25` all work; punctuation is ignored). **Tab** switches between the
   intelligence and coding index; the active metric is shown in the status line.
-- **Providers view** – **Enter** on a model ranks its endpoints by ProviderScore scored
-  cost per 1M tokens. **Tab** or **a** toggles between the primary quantization and all variants.
-- **Detail view** – **Enter** on a provider shows the full cost breakdown and pricing.
+- **Providers view** – **Enter** on a model ranks its endpoints by ProviderScore expected
+  task cost. **Tab** or **a** toggles between the primary quantization and all variants.
+- **Detail view** – **Enter** on a provider shows the task-cost decomposition (fixed, time,
+  cached-read baseline, miss premium, failure premium), the perfect- and cold-cache bounds, the
+  risk terms, the probability of migrating to the fallback, and the prices used.
 - Navigation: Up/Down or Ctrl-P/N, PgUp/PgDn, mouse wheel and click, Esc/Backspace to go
   back (Esc clears the search first), Ctrl-C to quit. Runs in the alternate screen buffer so
   your scrollback is untouched.
 
-### `score_providers.py` — cost and utility scoring
+### `score_providers.py` — expected task cost per provider
 
 ```bash
-./score_providers.py z.ai/glm-5.3-flash --top 5                 # token cost + failure risk
-./score_providers.py z.ai/glm-5.3-flash --time-value 30         # value your time at $30/hr
-./score_providers.py z.ai/glm-5.3-flash --no-failures           # pure token cost
-./score_providers.py z.ai/glm-5.3-flash --all-quants            # include non-primary quantizations
-./score_providers.py z.ai/glm-5.3-flash --json
+./score_providers.py z.ai/glm-5.3-flash --top 5                     # default: 300k-token task, $20/hr
+./score_providers.py z.ai/glm-5.3-flash -t 0                          # tokens and failures only
+./score_providers.py z.ai/glm-5.3-flash --task-tokens 1000000 -a 4000  # longer task, bigger tool results
+./score_providers.py z.ai/glm-5.3-flash --routing order               # explicit provider order (return to primary)
+./score_providers.py z.ai/glm-5.3-flash --cache cold                  # cold-cache bound
+./score_providers.py z.ai/glm-5.3-flash --sigma-h 0.03 --lambda-par 1 # penalise being wrong about the hit rate
+./score_providers.py z.ai/glm-5.3-flash --all-quants --json
 ```
 
 ```text
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-ProviderScore Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
-Mode: Full Utility Model  •  Turn: 2000 prompt + 500 completion tokens  •  Time Value: $0.00/hr
-Discounts: Applied  •  Failure Risk: Yes  •  Quantization: primary
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider            Scored $/M    Token $/M    Fail $/M  CacheHit   Hit $/M   Miss $/M   Latency    TPS   Uptime
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0680      $0.0675     $0.0005     88.5%   $0.0150    $0.0750     4.64s     31    98.9%
-NovitaAI               $0.0702      $0.0700     $0.0003     83.4%   $0.0150    $0.0750     1.70s     37    99.3%
-GMICloud               $0.0808      $0.0803     $0.0006     61.9%   $0.0150    $0.0750     5.57s     24    98.1%
-DeepInfra              $0.0876      $0.0875     $0.0001     46.9%   $0.0150    $0.0750     1.06s     24    99.5%
-Morph                  $0.1359      $0.1322     $0.0036     70.2%   $0.0200    $0.1300     1.81s     19    94.1%
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Lower Scored $/M is better. CacheHit is the published 24h token-weighted cache hit rate.
+ProviderScore Task Cost: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
+Task: 120 turns × (2000 new + 500 out) → 300k tokens  •  Time: $20/hr  •  Routing: sticky  •  Miss: rewrite  •  Cache: aggregate
+Quantization: primary
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider              Task $   Tokens $     Time $    Fail $    Miss $  CacheHit   E[TTFT]    TPS   Uptime   Read $/M   Miss $/M       $/M
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Baseten                $6.23      $1.69      $4.53   $0.0068     $1.09     49.1%     1.13s     93    99.5%    $0.0300    $0.1500   $0.3431
+Modal                  $8.69      $1.45      $7.23   $0.0023   $0.8523     60.2%     0.50s     52    99.9%    $0.0300    $0.1500   $0.4786
+Parasail              $10.28    $0.9252      $9.34   $0.0081   $0.3237     84.8%     2.99s     53    96.7%    $0.0300    $0.1500   $0.5663
+Phala                 $10.90      $1.13      $9.76   $0.0105   $0.5263     75.3%     2.21s     42    98.8%    $0.0300    $0.1500   $0.6005
+DeepInfra             $11.22    $0.8634     $10.35   $0.0039   $0.5627     47.3%     1.27s     40    99.4%    $0.0150    $0.0750   $0.6179
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.
 ```
 
-Costs are computed for one turn (2000 prompt + 500 completion tokens by default) and shown
-per 1M tokens: `Scored $/M` = `Token $/M` + `Time $/M` + `Fail $/M`.
+`Task $` is the expected cost of the whole task: `Tokens $` (new tokens, output, and the
+cached-read baseline plus `Miss $`, the cache-miss premium) + `Time $` + `Fail $`. The default
+task is 120 turns of 2000 new + 500 output tokens, growing the transcript to 300k, with time
+at $20/hr and OpenRouter's default sticky routing. `$/M` is the same cost per 1M submitted
+tokens and is secondary: it falls as tasks get longer while the bill rises. `E[TTFT]` is the
+lognormal mean fitted to the published p50/p90.
 
 By default only the model's primary quantization (usually `fp8`) is shown, matching the
 variant OpenRouter prices on the web. Pass `--all-quants` to see community variants too.
 
 ### `provider_frontier.py` — provider Pareto frontier
 
-Rather than guessing a dollar value for your time, this reports which providers are
-**non-dominated** across five objectives: scored cost ↓, latency ↓, throughput ↑, cache hit
-rate ↑, uptime ↑.
+Reports which providers are **non-dominated** across five objectives: expected task cost ↓,
+expected time to first token ↓, throughput ↑, cache hit rate ↑, uptime ↑. It takes the same
+task-profile flags as `score_providers.py`.
 
 ```bash
 ./provider_frontier.py z.ai/glm-5.3-flash
@@ -119,21 +129,27 @@ rate ↑, uptime ↑.
 ```
 
 ```text
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Provider Pareto Frontier: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
-Turn: 2000 prompt + 500 completion tokens
-Objectives: Cost ↓  Latency ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quantization: primary
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider            Scored $/M    Token $/M   Latency    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0680      $0.0675     4.64s     31     88.5%    98.9%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
-NovitaAI               $0.0702      $0.0700     1.70s     37     83.4%    99.3%  ★ OPTIMAL        Balanced Trade-off
-GMICloud               $0.0808      $0.0803     5.57s     24     61.9%    98.1%  Dominated        --
-DeepInfra              $0.0876      $0.0875     1.06s     24     46.9%    99.5%  ★ OPTIMAL        Balanced Trade-off
-Parasail               $0.1408      $0.1380     1.29s     68     85.4%    96.6%  ★ OPTIMAL        Balanced Trade-off
-Modal                  $0.1635      $0.1634     0.43s     51     58.9%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
-io.net                 $0.1945      $0.1915     1.47s     12     29.7%    89.5%  Dominated        --
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Task: 120 turns × (2000 new + 500 out) → 300k tokens  •  Time: $20/hr  •  Routing: sticky  •  Miss: rewrite  •  Cache: aggregate
+Objectives: Task cost ↓  E[TTFT] ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quantization: primary
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider              Task $   Tokens $   E[TTFT]    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage               
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Baseten                $6.23      $1.69     1.13s     93     49.1%    99.5%  ★ OPTIMAL        Lowest Cost • Highest TPS       
+Modal                  $8.69      $1.45     0.50s     52     60.2%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime 
+Parasail              $10.28    $0.9252     2.99s     53     84.8%    96.7%  ★ OPTIMAL        Balanced Trade-off              
+Phala                 $10.90      $1.13     2.21s     42     75.3%    98.8%  ★ OPTIMAL        Balanced Trade-off              
+DeepInfra             $11.22    $0.8634     1.27s     40     47.3%    99.4%  Dominated        --                              
+Reka AI               $11.66      $2.01     1.76s     46     34.2%    99.8%  Dominated        --                              
+Morph                 $12.55      $1.01     2.10s     41     69.6%    94.2%  ★ OPTIMAL        Balanced Trade-off              
+Sail Research         $13.03    $0.9114     4.29s     38     85.5%    98.0%  ★ OPTIMAL        Balanced Trade-off              
+NextBit               $13.04      $1.59     3.02s     42     53.5%    99.6%  Dominated        --                              
+NovitaAI              $13.83    $0.4770     3.41s     33     83.5%    99.2%  ★ OPTIMAL        Balanced Trade-off              
+SiliconFlow           $14.05      $1.30     2.03s     31     67.5%    99.7%  ★ OPTIMAL        Balanced Trade-off              
+Z.ai                  $15.47    $0.4278     6.09s     32     88.1%    98.8%  ★ OPTIMAL        Best Cache Hit                  
+GMICloud              $25.08    $0.6978     9.21s     21     62.7%    98.1%  Dominated        --                              
+io.net                $30.95      $2.05     1.36s     12     32.3%    90.3%  Dominated        --                              
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ★ OPTIMAL marks non-dominated providers: no other provider is at least as good on every objective and better on one.
 ```
 
@@ -178,14 +194,14 @@ Models with no active provider are skipped in favour of the next best qualifying
 ```bash
 ./model_router.py 60                                # cheapest model with intelligence >= 60
 ./model_router.py 60 --mode efficient               # most quality per dollar above 60
-./model_router.py 45 --metric coding --time-value 30
+./model_router.py 45 --metric coding --task-tokens 100000
 ./model_router.py 70 --json
 ```
 
 ```python
 from model_router import route
 r = route(60, metric="intelligence", mode="efficient")
-r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
+r.model_id, r.provider.provider_slug, r.provider.task_cost_usd
 ```
 
 ### `get_models.py` — catalog search and inspection
@@ -202,8 +218,8 @@ r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
 
 ```bash
 openrouter-frontier stats   z-ai/glm-5.3-flash --sort cache --top 5   # 24h metrics table
-openrouter-frontier score   z-ai/glm-5.3-flash --time-value 30        # ProviderScore ranking
-openrouter-frontier cache   z-ai/glm-5.3-flash novita                 # one provider's cache economics
+openrouter-frontier score   z-ai/glm-5.3-flash --routing order        # ProviderScore task-cost ranking
+openrouter-frontier cache   z-ai/glm-5.3-flash novita                 # one provider's task-cost breakdown
 openrouter-frontier compare z-ai/glm-5.3-flash z-ai novita deepinfra  # side by side
 openrouter-frontier search  glm
 ```
@@ -213,58 +229,65 @@ openrouter-frontier search  glm
 
 ## Scoring model
 
-Let $C$ be prompt tokens and $O$ completion tokens per turn (defaults 2000 and 500). Prices are
-USD per million tokens from the endpoints API: $\text{in}$, $\text{out}$, and optionally
-$\text{read}$ (cache read) and $\text{write}$ (cache write).
+The unit of cost is a **task**, not a call. The full derivation, assumptions, and the
+variance results are in [docs/task_cost_model.tex](docs/task_cost_model.tex); this is the
+summary the code implements (`openrouter_frontier/scoring.py`).
 
-**Cache prices.** If the endpoint has no cache-read price it has no cache: every prompt token
-is a miss at the input price and the hit rate is forced to zero.
+**Task profile.** $N$ turns; each appends $a$ new prompt tokens and $o$ completion tokens, so
+the transcript grows by $d = a + o$ per turn. At turn $k$ the prompt is a reusable prefix
+$S_k = (k-1)d$ plus the $a$ new tokens. Defaults: $a = 2000$, $o = 500$, and $N$ chosen so the
+transcript reaches 300,000 tokens ($N = 120$).
+
+**Prices** (USD per token; endpoints API values are already net of discount): $b$ ordinary
+input, $r$ cache read, $w$ cache write ($w = b$ when unpublished), $c$ completion, $f$ per
+request. On a miss the prefix is billed at $m = w$ (rewritten, default) or $m = b$ (processed).
+An endpoint with no read price has no cache: $r = w = b$, $h = 0$.
+
+**Inputs.** $h$ is the published 24-hour token-weighted cache hit rate, used as observed (it is
+a measurement over millions of requests, so no prior is applied; `--cache cold|assumed`
+override it). $u$ is the published uptime. Time to first token and seconds per output token
+are lognormal means fitted to the published p50 and p90. Missing latency, throughput, or
+uptime is imputed as the worst observed among the model's endpoints.
+
+**Turn cost on the primary endpoint** (cached fraction $H_k$ with mean $h$, $v' = v/3600$):
 
 $$
-\text{hitPrice} = \begin{cases}\text{read} & \text{if present}\\ \text{in} & \text{otherwise}\end{cases}
+X_k^{\text{ok}} = f + w\,a + c\,o + v'\big(\mathbb{E}[\ell] + o\,\mathbb{E}[s]\big) + S_k\big[m - H_k (m - r)\big],
 \qquad
-\text{missPrice} = \begin{cases}\text{in} & \text{if read absent}\\ \text{write} & \text{if write present}\\ \text{in} & \text{otherwise}\end{cases}
+\mathbb{E}[X_k^{\text{ok}}] = \alpha + \pi S_k,\ \ \pi = h r + (1-h) m .
 $$
 
-**Cache hit rate.** $h$ is the endpoint's published 24-hour token-weighted cache hit rate,
-used exactly as observed. It is a measurement over millions of requests, not an estimate, so
-no shrinkage or prior is applied. An endpoint with no published rate is scored as a cold cache.
+**Failure.** With probability $q = 1 - u$ the request fails: the caller has waited
+$\mathbb{E}[\ell]$ for nothing and the turn is served cold by a fallback $B$ (default: the
+endpoint itself, cold), every token written at $w_B$. Under `--routing order` the next turn
+returns to the primary and pays a small return penalty $h(m-r)d$; under `--routing sticky`
+(OpenRouter's default) the task stays on the fallback from then on.
 
-**Token cost.**
-
-$$
-\text{tokenCost} = \frac{C\,\big(h\,\text{hitPrice} + (1-h)\,\text{missPrice}\big) + O\,\text{out}}{10^6} + \text{requestFee}
-$$
-
-**Time cost.** With a value of time $v$ in USD/hour, waiting for the first token and streaming
-the completion at $\text{tps}$ tokens/s costs
+**Task cost.** $X_{\text{task}} = \sum_{k=1}^{N} X_k$. Under `order`,
 
 $$
-\text{timeCost} = \frac{v}{3600}\left(\text{ttft} + \frac{O}{\text{tps}}\right)
+\mathbb{E}[X_{\text{task}}] = N A_0 + \Pi\, d\,\frac{N(N-1)}{2} + q\,h\,(m-r)\,d\,(N-1),
+\qquad \Pi = (1-q)\,\pi + q\,w_B ,
 $$
 
-**Failure cost.** With probability $1-\text{uptime}$ the request fails and is retried elsewhere,
-losing the cached prefix (the cached share is paid at miss price instead of hit price) and the
-time already spent waiting:
+and the quadratic term splits into a cached-read baseline $r$, a miss premium
+$(1-q)(1-h)(m-r)$, and a failure premium $q(w_B - r)$, each times $d\,N(N-1)/2$. Under
+`sticky` the code evaluates the geometric mixture over the migration time turn by turn; the
+probability the task finishes on the fallback is $1-(1-q)^N$, which at $N = 120$ is already
+70% for an endpoint with 99% uptime.
 
-$$
-\text{failureCost} = (1-\text{uptime})\left[\frac{C\,h\,(\text{missPrice}-\text{hitPrice})}{10^6} + \frac{v}{3600}\,\text{ttft}\right]
-$$
-
-$$
-\text{totalCost} = \text{tokenCost} + \text{timeCost} + \text{failureCost}
-$$
-
-All four are per-turn dollar amounts; the tools display them normalised to 1M tokens,
-$\text{cost} \cdot 10^6 / (C + O)$. `--time-value 0 --no-failures` reduces this to the pure
-token cost model.
+**Risk.** The process bound $\sigma_{\text{proc}}$ (Bernoulli misses plus the failure mixture
+term) grows as $N^{3/2}$. The parameter term $\sigma_{\text{par}} = (1-q)(m-r)\sigma_h\, d\,N(N-1)/2$
+grows as $N^2$ for a caller-supplied $\sigma_h$ (drift or workload mismatch). Endpoints are
+ranked by $J = \mathbb{E}[X_{\text{task}}] + \lambda_{\text{proc}}\sigma_{\text{proc}} + \lambda_{\text{par}}\sigma_{\text{par}}$,
+with both $\lambda$ zero by default.
 
 ## Pareto analysis
 
 **Dominance.** Provider $b$ dominates $a$ if $b$ is at least as good on every objective and
 strictly better on at least one. Providers that nobody dominates form the frontier. A missing
 metric is treated as the worst possible value, so an endpoint with no latency data can never
-win on latency. The provider frontier uses scored cost, TTFT, throughput, $h$,
+win on latency. The provider frontier uses expected task cost, expected TTFT, throughput, $h$,
 and uptime; the catalog frontier (`provider_frontier.py --models`) uses turn cost, context
 length, cache-read price, and completion price.
 
@@ -286,13 +309,15 @@ from openrouter_frontier import (
     Objective, pareto_mask,
 )
 
-# Rank providers by expected cost (token cost + failure risk by default).
+# Rank providers by expected task cost (300k-token task, $20/hr, sticky routing by default).
 for s in score_model_providers("z-ai/glm-5.3-flash")[:3]:
-    print(f"{s.provider_name:<12} {s.formatted_total_cost}/M  cache hit {s.formatted_cache_hit_rate}")
+    print(f"{s.provider_name:<12} {s.formatted_task_cost} per task  time {s.formatted_time_cost}  cache hit {s.formatted_cache_hit_rate}")
 
-# A longer-context agentic turn, valuing time at $30/hr.
-cfg = ScoringConfig(prompt_tokens=8000, completion_tokens=1000, time_value_usd_per_hour=30.0)
+# A 1M-token agentic task with big tool results, explicit provider order, tokens only.
+cfg = ScoringConfig(new_tokens_per_turn=6000, completion_tokens=800, task_tokens=1_000_000,
+                    time_value_usd_per_hour=0, routing="order")
 best = score_model_providers("z-ai/glm-5.3-flash", config=cfg)[0]
+best.task_cost_usd, best.miss_premium_usd, best.migration_probability
 
 # Raw 24h stats, sorted however you like.
 stats = get_model_stats("glm-5.3-flash")
@@ -301,7 +326,7 @@ fastest = stats.sort_by("latency")[0]
 # Generic N-objective Pareto mask over your own objects.
 scores = stats.score_providers()
 mask = pareto_mask(scores, [
-    Objective(lambda s: s.total_cost_usd, minimize=True),
+    Objective(lambda s: s.task_cost_usd, minimize=True),
     Objective(lambda s: s.ttft_seconds, minimize=True),
     Objective(lambda s: s.uptime_pct, minimize=False),
 ])

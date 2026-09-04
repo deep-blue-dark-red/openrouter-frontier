@@ -4,8 +4,8 @@
 Instead of collapsing latency, throughput, and reliability into a single dollar figure via a
 time-value guess, this reports which providers are non-dominated across five objectives:
 
-    minimise  scored cost per turn      (ProviderScore, pure token cost + failure risk)
-    minimise  p50 time to first token
+    minimise  expected task cost        (ProviderScore: tokens + time + failures)
+    minimise  expected time to first token
     maximise  p50 throughput (tokens/s)
     maximise  24h cache hit rate
     maximise  24h uptime
@@ -32,10 +32,15 @@ from openrouter_frontier.client import score_model_providers
 from openrouter_frontier.pareto import Objective, pareto_mask
 from openrouter_frontier.render import Column, fmt_context, fmt_pct, fmt_seconds, fmt_tps, print_table
 from openrouter_frontier.resolver import get_all_models, resolve_model
+from openrouter_frontier.profile_args import add_task_args, config_from_args, describe_profile
 from openrouter_frontier.scoring import ScoringConfig
 
 OPTIMAL = "★ OPTIMAL"
 DOMINATED = "Dominated"
+
+
+def _usd(x: float) -> str:
+    return f"${x:,.0f}" if abs(x) >= 100 else (f"${x:,.2f}" if abs(x) >= 1 else f"${x:.4f}")
 
 
 def _near(a: Optional[float], b: float, tol: float) -> bool:
@@ -48,9 +53,9 @@ def _near(a: Optional[float], b: float, tol: float) -> bool:
 class ProviderCandidate:
     provider_name: str
     provider_slug: str
-    scored_cost_usd: float       # per turn
-    token_cost_usd: float        # per turn
-    scored_cost_per_m: float     # same cost normalised to $ per 1M tokens (display)
+    scored_cost_usd: float       # expected task cost
+    token_cost_usd: float        # token part of it
+    scored_cost_per_m: float     # task cost per 1M submitted tokens (secondary)
     token_cost_per_m: float
     cache_hit_rate: float
     hit_price: float
@@ -106,9 +111,9 @@ def compute_provider_pareto(candidates: List[ProviderCandidate]) -> List[Provide
 def print_provider_table(candidates: List[ProviderCandidate], model_name: str, cfg: ScoringConfig, filter_desc: str) -> None:
     cols = [
         Column("Provider", 16),
-        Column("Scored $/M", 12, ">"),
-        Column("Token $/M", 11, ">"),
-        Column("Latency", 8, ">"),
+        Column("Task $", 10, ">"),
+        Column("Tokens $", 9, ">"),
+        Column("E[TTFT]", 8, ">"),
         Column("TPS", 5, ">"),
         Column("CacheHit", 8, ">"),
         Column("Uptime", 7, ">"),
@@ -118,8 +123,8 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
     rows = [
         [
             c.provider_name,
-            f"${c.scored_cost_per_m:.4f}",
-            f"${c.token_cost_per_m:.4f}",
+            _usd(c.scored_cost_usd),
+            _usd(c.token_cost_usd),
             fmt_seconds(c.ttft_seconds),
             fmt_tps(c.throughput_tps),
             f"{c.cache_hit_rate * 100.0:.1f}%",
@@ -133,8 +138,8 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
         cols, rows,
         title=f"Provider Pareto Frontier: {model_name}",
         subtitle_lines=[
-            f"Turn: {cfg.prompt_tokens} prompt + {cfg.completion_tokens} completion tokens",
-            f"Objectives: Cost ↓  Latency ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  {filter_desc}",
+            describe_profile(cfg),
+            f"Objectives: Task cost ↓  E[TTFT] ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  {filter_desc}",
         ],
         footer=f"{OPTIMAL} marks non-dominated providers: no other provider is at least as good on every objective and better on one.",
     )
@@ -263,8 +268,7 @@ def main() -> None:
     )
     parser.add_argument("model", nargs="?", default=None, help="Model slug or shorthand (or 'models' for catalog mode)")
     parser.add_argument("--models", action="store_true", help="Catalog-wide model frontier instead of a provider frontier")
-    parser.add_argument("-c", "--prompt-tokens", type=int, default=2000, help="Prompt tokens per turn (C)")
-    parser.add_argument("-o", "--completion-tokens", type=int, default=500, help="Completion tokens per turn (O)")
+    add_task_args(parser)
     parser.add_argument("--quant", type=str, default="auto", help="Provider mode quantization filter: auto, all, or e.g. fp8")
     parser.add_argument("--all-quants", action="store_true", help="Shorthand for --quant all")
     parser.add_argument("--optimal-only", action="store_true", help="Show only Pareto-optimal candidates")
@@ -272,7 +276,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args()
 
-    cfg = ScoringConfig(prompt_tokens=args.prompt_tokens, completion_tokens=args.completion_tokens)
+    cfg = config_from_args(args)
 
     if args.models or (args.model and args.model.lower() in ("models", "all", "catalog")):
         candidates = compute_model_pareto(build_model_candidates(cfg))
@@ -305,8 +309,8 @@ def main() -> None:
             provider_slug=s.provider_slug,
             scored_cost_usd=s.total_cost_usd,
             token_cost_usd=s.token_cost_usd,
-            scored_cost_per_m=s.total_cost_per_m,
-            token_cost_per_m=s.token_cost_per_m,
+            scored_cost_per_m=s.task_cost_per_m,
+            token_cost_per_m=s.token_cost_usd / s.submitted_tokens * 1e6 if s.submitted_tokens else 0.0,
             cache_hit_rate=s.cache_hit_rate,
             hit_price=s.hit_price,
             miss_price=s.miss_price,
