@@ -67,7 +67,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         cols.append(Column("Objective", 10, ">"))
     cols.append(Column("Tokens $", 9, ">"))
     if show_time:
-        cols.append(Column("Time $", 9, ">"))
+        cols += [Column("TTFT $", 8, ">"), Column("Gen $", 8, ">"), Column("Prefill $", 9, ">")]
     if cfg.price_failures:
         cols.append(Column("Fail $", 8, ">"))
     cols += [
@@ -88,7 +88,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
             row.append(r.formatted_objective)
         row.append(r.formatted_token_cost)
         if show_time:
-            row.append(r.formatted_time_cost)
+            row += [r.formatted_ttft_cost, r.formatted_decode_cost, r.formatted_prefill_cost]
         if cfg.price_failures:
             row.append(r.formatted_failure_cost)
         row += [
@@ -104,6 +104,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         rows.append(row)
 
     footer = ("Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. "
+              "TTFT $ = waiting for the first token every turn; Gen $ = decoding output; Prefill $ = re-prefilling the prefix after cache misses. "
               "Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). "
               "CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.")
     if any(r.imputed for r in results):

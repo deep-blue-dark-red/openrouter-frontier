@@ -237,7 +237,8 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
         table.add_column("Objective", justify="right")
     table.add_column("Tokens $", justify="right")
     if show_time:
-        table.add_column("Time $", justify="right")
+        for col in ("TTFT $", "Gen $", "Prefill $"):
+            table.add_column(col, justify="right")
     if cfg.price_failures:
         table.add_column("Fail $", justify="right")
     table.add_column("Miss $", justify="right")
@@ -251,7 +252,7 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
             row.append(s.formatted_objective)
         row.append(s.formatted_token_cost)
         if show_time:
-            row.append(s.formatted_time_cost)
+            row += [s.formatted_ttft_cost, s.formatted_decode_cost, s.formatted_prefill_cost]
         if cfg.price_failures:
             row.append(s.formatted_failure_cost)
         row += [
@@ -324,7 +325,7 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
             f"({score.turns} turns × {score.new_tokens}+{score.completion_tokens} tok, {score.routing} routing)"
         )
         console.print(
-            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} | failures {score.formatted_failure_cost} | "
+            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (ttft {score.formatted_ttft_cost}, gen {score.formatted_decode_cost}, prefill {score.formatted_prefill_cost}) | failures {score.formatted_failure_cost} | "
             f"miss premium {score.formatted_miss_premium} | perfect cache {_usd(score.perfect_cache_cost_usd)} | cold {_usd(score.cold_cache_cost_usd)}"
         )
         console.print(f"[bold cyan]Prices /M:[/bold cyan] input ${score.input_price:.4f} | read ${score.read_price:.4f} | write ${score.write_price:.4f} | miss ${score.miss_price:.4f}")

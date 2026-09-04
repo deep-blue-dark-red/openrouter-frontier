@@ -96,26 +96,29 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
 ProviderScore Task Cost: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Task: 145 turns × (2000 new + 69 out) → 300k context, 10k output  •  Time: $20/hr  •  Routing: sticky  •  Miss: rewrite  •  Cache: aggregate
 Quantization: primary
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider              Task $   Tokens $     Time $    Fail $    Miss $  CacheHit   E[TTFT]    TPS   Uptime   Read $/M   Miss $/M       $/M
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Parasail               $8.35      $1.10      $7.24   $0.0070   $0.4050     84.3%     2.99s     53    96.7%    $0.0300    $0.1500   $0.3814
-Baseten               $10.08      $2.00      $8.07   $0.0077     $1.30     49.5%     1.13s     93    99.5%    $0.0300    $0.1500   $0.4604
-Sail Research         $10.96      $1.09      $9.87   $0.0096   $0.3889     84.9%     4.29s     38    98.0%    $0.0300    $0.1500   $0.5006
-NovitaAI              $11.27    $0.5608     $10.71   $0.0049   $0.2125     83.5%     3.41s     33    99.2%    $0.0150    $0.0750   $0.5147
-Phala                 $11.55      $1.33     $10.22   $0.0106   $0.6287     75.6%     2.21s     42    98.8%    $0.0300    $0.1500   $0.5275
-Z.ai                  $11.91    $0.5034     $11.40   $0.0053   $0.1552     88.0%     6.09s     32    98.8%    $0.0150    $0.0750   $0.5440
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider              Task $   Tokens $    TTFT $     Gen $  Prefill $    Fail $    Miss $  CacheHit   E[TTFT]    TPS   Uptime   Read $/M   Miss $/M       $/M
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Parasail               $8.35      $1.10     $2.42     $1.22      $3.60   $0.0070   $0.4050     84.3%     2.99s     53    96.7%    $0.0300    $0.1500   $0.3814
+Baseten               $10.08      $2.00   $0.9099   $0.6300      $6.53   $0.0077     $1.30     49.5%     1.13s     93    99.5%    $0.0300    $0.1500   $0.4604
+Sail Research         $10.96      $1.09     $3.47     $1.54      $4.85   $0.0096   $0.3889     84.9%     4.29s     38    98.0%    $0.0300    $0.1500   $0.5006
+NovitaAI              $11.27    $0.5608     $2.76     $1.84      $6.10   $0.0049   $0.2125     83.5%     3.41s     33    99.2%    $0.0150    $0.0750   $0.5147
+Phala                 $11.55      $1.33     $1.79     $1.38      $7.05   $0.0106   $0.6287     75.6%     2.21s     42    98.8%    $0.0300    $0.1500   $0.5275
+Z.ai                  $11.91    $0.5034     $4.93     $1.83      $4.64   $0.0053   $0.1552     88.0%     6.09s     32    98.8%    $0.0150    $0.0750   $0.5440
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. TTFT $ = waiting for the first token every turn; Gen $ = decoding output; Prefill $ = re-prefilling the prefix after cache misses. Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.
 ```
 
 `Task $` is the expected cost of the whole task: `Tokens $` (new tokens, output, and the
-cached-read baseline plus `Miss $`, the cache-miss premium) + `Time $` + `Fail $`. The default
+cached-read baseline plus `Miss $`, the cache-miss premium) + `TTFT $` + `Gen $` + `Prefill $`
++ `Fail $`. The default
 task appends 2000 tokens of user text and tool results per turn until the context reaches 300k,
 generating 10k output tokens in total (145 turns of 69), with time at $20/hr and OpenRouter's
-default sticky routing. `Time $` counts time to first token, decoding at the published
-throughput, and re-prefilling the prefix after a cache miss at 100× the decode rate, which is
-why a high hit rate can beat raw throughput. `$/M` is the same cost per 1M submitted
+default sticky routing. The three time columns are what you wait for: `TTFT $` is the
+published time to first token paid every turn (the largest term for slow endpoints), `Gen $` is
+decoding the output at the published throughput, and `Prefill $` is re-prefilling the prefix
+after a cache miss at 100× the decode rate, which is why a high hit rate can beat raw
+throughput. `$/M` is the same cost per 1M submitted
 tokens and is secondary: it falls as tasks get longer while the bill rises. `E[TTFT]` is the
 lognormal mean fitted to the published p50/p90.
 
