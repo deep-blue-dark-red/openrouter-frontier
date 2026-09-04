@@ -158,6 +158,7 @@ def _task_options(f):
         click.option("--turns", "-N", default=None, type=int, help="Explicit number of turns."),
         click.option("--time-value", "-t", default=20.0, type=float, show_default=True, help="Value of your time in USD/hr; 0 disables."),
         click.option("--prefill-multiplier", default=100.0, type=float, show_default=True, help="Prompt-processing speed as a multiple of decode throughput."),
+        click.option("--overhead-seconds", default=0.0, type=float, help="Fixed per-request wait charged on top of prefill and decode."),
         click.option("--price-failures/--no-failures", default=True, help="Price failures from 24h uptime."),
         click.option("--routing", type=click.Choice(["sticky", "order"]), default="sticky", show_default=True, help="OpenRouter routing policy assumed."),
         click.option("--miss-policy", type=click.Choice(["rewrite", "process"]), default="rewrite", show_default=True, help="Cache-miss billing policy."),
@@ -177,7 +178,7 @@ def _config(kw: Dict[str, Any]) -> ScoringConfig:
     return ScoringConfig(
         new_tokens_per_turn=kw["new_tokens"], task_tokens=kw["task_tokens"], output_tokens=kw["output_tokens"],
         completion_tokens=kw["completion_tokens"], turns=kw["turns"],
-        time_value_usd_per_hour=kw["time_value"], prefill_multiplier=kw["prefill_multiplier"], price_failures=kw["price_failures"],
+        time_value_usd_per_hour=kw["time_value"], prefill_multiplier=kw["prefill_multiplier"], overhead_seconds=kw["overhead_seconds"], price_failures=kw["price_failures"],
         routing=kw["routing"], miss_policy=kw["miss_policy"], cache_mode=kw["cache_mode"],
         assumed_hit_rate=kw["assumed_hit_rate"], sigma_h=kw["sigma_h"],
         lambda_proc=kw["lambda_proc"], lambda_par=kw["lambda_par"], apply_discount=kw["discount"],
@@ -237,7 +238,7 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
         table.add_column("Objective", justify="right")
     table.add_column("Tokens $", justify="right")
     if show_time:
-        for col in ("TTFT $", "Gen $", "Prefill $"):
+        for col in (("Overhead $",) if cfg.overhead_seconds > 0 else ()) + ("Prefill $", "Gen $"):
             table.add_column(col, justify="right")
     if cfg.price_failures:
         table.add_column("Fail $", justify="right")
@@ -252,7 +253,7 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
             row.append(s.formatted_objective)
         row.append(s.formatted_token_cost)
         if show_time:
-            row += [s.formatted_ttft_cost, s.formatted_decode_cost, s.formatted_prefill_cost]
+            row += ([s.formatted_ttft_cost] if cfg.overhead_seconds > 0 else []) + [s.formatted_prefill_cost, s.formatted_decode_cost]
         if cfg.price_failures:
             row.append(s.formatted_failure_cost)
         row += [
@@ -325,7 +326,7 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
             f"({score.turns} turns × {score.new_tokens}+{score.completion_tokens} tok, {score.routing} routing)"
         )
         console.print(
-            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (ttft {score.formatted_ttft_cost}, gen {score.formatted_decode_cost}, prefill {score.formatted_prefill_cost}) | failures {score.formatted_failure_cost} | "
+            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (prefill {score.formatted_prefill_cost}, gen {score.formatted_decode_cost}, overhead {score.formatted_ttft_cost}) | failures {score.formatted_failure_cost} | "
             f"miss premium {score.formatted_miss_premium} | perfect cache {_usd(score.perfect_cache_cost_usd)} | cold {_usd(score.cold_cache_cost_usd)}"
         )
         console.print(f"[bold cyan]Prices /M:[/bold cyan] input ${score.input_price:.4f} | read ${score.read_price:.4f} | write ${score.write_price:.4f} | miss ${score.miss_price:.4f}")

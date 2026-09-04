@@ -112,11 +112,23 @@ def test_cache_miss_costs_prefill_time():
     cfg = ScoringConfig(new_tokens_per_turn=5000, completion_tokens=0, turns=3, time_value_usd_per_hour=3600.0,
                         price_failures=False, prefill_multiplier=100.0)
     sb = evaluate_endpoint(pr, inp, cfg)
-    # prefixes 0, 5000, 10000 tokens => 0 + 1 + 2 seconds of prefill
-    assert math.isclose(sb.time_cost_usd, 3.0)
+    # new tokens 5000 each turn (1 s) + prefixes 0, 5000, 10000 tokens (0 + 1 + 2 s) => 6 s
+    assert math.isclose(sb.time_cost_usd, 6.0) and math.isclose(sb.prefill_cost_usd, 6.0)
     warm = evaluate_endpoint(pr, EndpointInputs(cache_hit_rate=1.0, uptime_pct=100, ttft_p50=0.0, tps_p50=50.0), cfg)
-    assert warm.time_cost_usd == 0.0
+    assert math.isclose(warm.time_cost_usd, 3.0)  # only the new tokens
     assert sb.prefill_tps == 5000.0
+    # the published TTFT is not charged
+    slow = evaluate_endpoint(pr, EndpointInputs(cache_hit_rate=1.0, uptime_pct=100, ttft_p50=30.0, tps_p50=50.0), cfg)
+    assert math.isclose(slow.time_cost_usd, 3.0) and slow.ttft_seconds == 30.0
+
+
+def test_overhead_seconds_charged_per_request():
+    pr = EndpointPricing(prompt=0.0, completion=0.0, input_cache_read=0.0)
+    inp = EndpointInputs(cache_hit_rate=1.0, uptime_pct=100)  # no throughput => no prefill or decode time
+    cfg = ScoringConfig(new_tokens_per_turn=1, completion_tokens=0, turns=4, time_value_usd_per_hour=3600.0,
+                        price_failures=False, overhead_seconds=0.5)
+    sb = evaluate_endpoint(pr, inp, cfg)
+    assert math.isclose(sb.ttft_cost_usd, 2.0) and math.isclose(sb.time_cost_usd, 2.0)
 
 
 def test_time_cost_uses_lognormal_means_and_seconds_per_token():
@@ -127,24 +139,26 @@ def test_time_cost_uses_lognormal_means_and_seconds_per_token():
     assert math.isclose(inp.expected_seconds_per_token, (1 / 50) * math.exp(sigma ** 2 / 2))
     cfg = ScoringConfig(turns=4, completion_tokens=100, new_tokens_per_turn=0, time_value_usd_per_hour=3600.0, price_failures=False)
     sb = evaluate_endpoint(EndpointPricing(prompt=0.0, completion=0.0, input_cache_read=0.0), inp, cfg)
-    assert math.isclose(sb.time_cost_usd, 4 * (inp.expected_ttft + 100 * inp.expected_seconds_per_token))
+    # no new tokens and h = 1 => no prefill; decode only, at the lognormal mean seconds/token
+    assert math.isclose(sb.decode_cost_usd, 4 * 100 * inp.expected_seconds_per_token)
+    assert math.isclose(sb.time_cost_usd, sb.decode_cost_usd)
 
 
 def test_failure_cold_retry_and_return_penalty():
-    # u = 90%, B = A cold; every failed turn: wasted ttft on A, cold turn on B (all tokens written), retry time
+    # u = 90%, B = A cold, $1/s, 0.5 s overhead per request, no throughput published (=> no prefill/decode time).
     pr = EndpointPricing(prompt=1.0, completion=0.0, input_cache_read=0.0)
-    inp = EndpointInputs(cache_hit_rate=1.0, uptime_pct=90.0, ttft_p50=2.0, tps_p50=50.0)
-    cfg = ScoringConfig(new_tokens_per_turn=1_000_000, completion_tokens=0, turns=2, time_value_usd_per_hour=3600.0, routing="order")
+    inp = EndpointInputs(cache_hit_rate=1.0, uptime_pct=90.0)
+    cfg = ScoringConfig(new_tokens_per_turn=1_000_000, completion_tokens=0, turns=2, time_value_usd_per_hour=3600.0,
+                        routing="order", overhead_seconds=0.5)
     sb = evaluate_endpoint(pr, inp, cfg)
     q = 0.1
-    # turn 1: S=0. ok: 1.0 + 2s; fail: wasted 2s + cold 1.0 + 2s.
-    # turn 2: S=1M. ok: 1.0 new + 0 read + 2s; fail: 2s + (1.0 + 1.0 cold prefix) + 2s; no return penalty on last turn
-    # turn 2 cold retry also re-prefills the 1M-token prefix at 100 x 50 = 5000 tok/s = 200 s
-    expect = ((1 - q) * (1.0 + 2) + q * (2 + 1.0 + 2)) + ((1 - q) * (1.0 + 2) + q * (2 + 2.0 + 2 + 200))
-    # return penalty at turn 1 only: h (m - r + v'/prefill) d = 1 * (1e-6 + 1/5000) * 1e6 = 1 + 200
-    expect += q * (1.0 + 200.0)
+    # turn 1: S=0. ok: $1.0 new + 0.5 s; fail: wasted 0.5 s + cold $1.0 + 0.5 s.
+    # turn 2: S=1M. ok: $1.0 new + $0 read + 0.5 s; fail: 0.5 s + ($1.0 + $1.0 cold prefix) + 0.5 s; no return penalty on last turn
+    expect = ((1 - q) * (1.0 + 0.5) + q * (0.5 + 1.0 + 0.5)) + ((1 - q) * (1.0 + 0.5) + q * (0.5 + 2.0 + 0.5))
+    expect += q * 1.0  # return penalty at turn 1 only: h (m - r) d = 1 * 1e-6 * 1e6 = $1.0 (no prefill term without throughput)
     assert math.isclose(sb.task_cost_usd, expect)
-    assert math.isclose(sb.return_penalty_usd, q * 201.0)
+    assert math.isclose(sb.return_penalty_usd, q * 1.0)
+    assert math.isclose(sb.ttft_cost_usd, (1 - q) * 0.5 * 2 + q * 1.0 * 2)
 
 
 def test_impute_missing_takes_worst_observed():

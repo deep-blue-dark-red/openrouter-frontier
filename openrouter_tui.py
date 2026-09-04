@@ -208,9 +208,8 @@ PROVIDER_COLS = [
     Column("Provider", 16),
     Column("Task $", 9, ">"),
     Column("Tokens $", 9, ">"),
-    Column("TTFT $", 8, ">"),
-    Column("Gen $", 7, ">"),
     Column("Prefill $", 9, ">"),
+    Column("Gen $", 7, ">"),
     Column("Miss $", 8, ">"),
     Column("CacheHit", 8, ">"),
     Column("E[TTFT]", 8, ">"),
@@ -304,7 +303,7 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
             line = format_row(
                 [
                     s.provider_name[:16], s.formatted_task_cost, s.formatted_token_cost,
-                    s.formatted_ttft_cost, s.formatted_decode_cost, s.formatted_prefill_cost,
+                    s.formatted_prefill_cost, s.formatted_decode_cost,
                     s.formatted_miss_premium, s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds),
                     fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct), f"${s.task_cost_per_m:.4f}",
                 ],
@@ -336,7 +335,7 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
     write(f"  Expected Task Cost:         \x1b[1;32m{s.formatted_task_cost}{RESET}   (per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
     write(f"    fixed (new tok + output):  {_usd(s.fixed_cost_usd)}")
-    write(f"    time:                      {_usd(s.time_cost_usd)}  (ttft {_usd(s.ttft_cost_usd)}, gen {_usd(s.decode_cost_usd)}, prefill {_usd(s.prefill_cost_usd)})")
+    write(f"    time:                      {_usd(s.time_cost_usd)}  (prefill {_usd(s.prefill_cost_usd)}, gen {_usd(s.decode_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})")
     write(f"    cached-read baseline:      {_usd(s.read_baseline_usd)}")
     write(f"    cache-miss premium:        {_usd(s.miss_premium_usd)}")
     write(f"    failure premium + return:  {_usd(s.failure_premium_usd + s.return_penalty_usd)}")

@@ -44,8 +44,13 @@ class ScoringConfig:
                   ``(task_tokens - output_tokens) / a`` unless given explicitly.
     :param time_value_usd_per_hour: ``v`` — value of the caller's wall-clock time.
     :param prefill_multiplier: prompt-processing speed as a multiple of the endpoint's decode
-                               throughput (prefill is ~100× faster than generation). A cache
-                               miss re-prefills the whole prefix at this rate; a hit skips it.
+                               throughput (prefill is ~100× faster than generation). Every
+                               turn prefills its new tokens at this rate; a cache miss also
+                               re-prefills the whole prefix. The published time-to-first-token
+                               is *not* charged: it is the prefill of the publisher's traffic
+                               mix and would double count. It is kept for display and Pareto.
+    :param overhead_seconds: fixed per-request wait (network, queueing) charged on every
+                             request on top of prefill.
     :param price_failures: charge for failures using the endpoint's 24h uptime.
     :param routing: ``"sticky"`` (OpenRouter default: a fallback becomes the new sticky
                     provider) or ``"order"`` (explicit provider order: return to the primary).
@@ -67,6 +72,7 @@ class ScoringConfig:
     turns: Optional[int] = None
     time_value_usd_per_hour: float = 20.0
     prefill_multiplier: float = 100.0
+    overhead_seconds: float = 0.0
     price_failures: bool = True
     routing: str = "sticky"
     miss_policy: str = "rewrite"
@@ -98,6 +104,8 @@ class ScoringConfig:
             raise ValueError("time value must be non-negative")
         if self.prefill_multiplier <= 0:
             raise ValueError("prefill_multiplier must be positive")
+        if self.overhead_seconds < 0:
+            raise ValueError("overhead_seconds must be non-negative")
         if self.turns is not None and self.turns < 1:
             raise ValueError("turns must be >= 1")
         if self.task_tokens < 1:
@@ -323,9 +331,9 @@ class ScoreBreakdown:
     task_cost_usd: float
     fixed_cost_usd: float
     time_cost_usd: float            # = ttft + decode + prefill
-    ttft_cost_usd: float            # waiting for the first token, every turn (and wasted waits on failure)
+    ttft_cost_usd: float            # fixed per-request overhead waits (overhead_seconds), incl. wasted ones
     decode_cost_usd: float          # generating o tokens per turn at E[s]
-    prefill_cost_usd: float         # re-prefilling missed / cold prefixes at g_p
+    prefill_cost_usd: float         # prefilling new tokens every turn plus missed / cold prefixes at g_p
     read_baseline_usd: float
     miss_premium_usd: float
     failure_premium_usd: float
@@ -559,16 +567,16 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
 
     # per-turn constants
     fixA = A.f + A.w * a + A.c * o
-    ttftA, genA = vps * A.El, vps * o * A.Es
-    ttftB, genB = vps * B.El, vps * o * B.Es
-    timeA = ttftA + genA
+    ovh = vps * cfg.overhead_seconds              # fixed per-request wait, same on every endpoint
+    genA, genB = vps * o * A.Es, vps * o * B.Es
     fixB_cold = B.f + B.w * a + B.c * o          # cold turn on B: new tokens written on B
-    timeFail = ttftA + ttftB + genB              # wasted wait on A + the retry on B
-    timeB = ttftB + genB
     piA = hA * A.r + (1.0 - hA) * A.m
     piB = hB * B.r + (1.0 - hB) * B.m
-    prefA = vps * A.Ep                            # $ of wall-clock per re-prefilled prefix token
+    prefA = vps * A.Ep                            # $ of wall-clock per prefilled prompt token
     prefB = vps * B.Ep
+    timeA = ovh + genA + a * prefA               # warm turn on A, before any prefix miss
+    timeFail = ovh + ovh + genB + a * prefB      # wasted overhead on A + cold retry on B
+    timeB = ovh + genB + a * prefB
     ret_per = hA * (A.m - A.r + prefA) * d        # return penalty under 'order' (money + prefill time)
     var_missA = (A.m - A.r + prefA) ** 2 * hA * (1.0 - hA)
     var_missB = (B.m - B.r + prefB) ** 2 * hB * (1.0 - hB)
@@ -583,9 +591,9 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
 
         # --- successful warm turn on A
         acc.fixed += p_ok * fixA
-        acc.ttft += p_ok * ttftA
+        acc.ttft += p_ok * ovh
         acc.decode += p_ok * genA
-        acc.prefill += p_ok * (1.0 - hA) * S * prefA          # missed prefix is re-prefilled
+        acc.prefill += p_ok * (a + (1.0 - hA) * S) * prefA    # new tokens always; missed prefix too
         acc.read += p_ok * A.r * S
         acc.miss += p_ok * (1.0 - hA) * (A.m - A.r) * S
         acc.reads += p_ok * hA * S
@@ -597,9 +605,9 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
 
         # --- failed on A, served cold by B
         acc.fixed += p_fail * fixB_cold
-        acc.ttft += p_fail * (ttftA + ttftB)
+        acc.ttft += p_fail * 2 * ovh
         acc.decode += p_fail * genB
-        acc.prefill += p_fail * S * prefB                  # whole prefix prefilled cold on B
+        acc.prefill += p_fail * (S + a) * prefB            # whole prompt prefilled cold on B
         acc.read += p_fail * A.r * S                       # baseline at A's read price ...
         acc.fail += p_fail * (B.w - A.r) * S               # ... plus the cold surcharge
         acc.writes += p_fail * (S + a)
@@ -617,9 +625,9 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         # --- warm turn on B (sticky only, after migration)
         if p_B > 0:
             acc.fixed += p_B * (B.f + B.w * a + B.c * o)
-            acc.ttft += p_B * ttftB
+            acc.ttft += p_B * ovh
             acc.decode += p_B * genB
-            acc.prefill += p_B * (1.0 - hB) * S * prefB
+            acc.prefill += p_B * (a + (1.0 - hB) * S) * prefB
             acc.read += p_B * B.r * S
             acc.miss += p_B * (1.0 - hB) * (B.m - B.r) * S
             acc.reads += p_B * hB * S

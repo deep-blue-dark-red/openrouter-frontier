@@ -20,6 +20,8 @@ def add_task_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("-t", "--time-value", type=float, default=20.0, help="Value of your time, USD per hour (0 disables)")
     g.add_argument("--prefill-multiplier", type=float, default=100.0,
                    help="Prompt-processing speed as a multiple of decode throughput; a cache miss re-prefills the prefix at this rate")
+    g.add_argument("--overhead-seconds", type=float, default=0.0,
+                   help="Fixed per-request wait (network/queue) charged on top of prefill and decode")
     g.add_argument("--no-failures", action="store_true", help="Do not price failures from 24h uptime")
     g.add_argument("--routing", choices=["sticky", "order"], default="sticky",
                    help="sticky = OpenRouter default, a fallback becomes sticky; order = explicit provider order, return to primary")
@@ -43,6 +45,7 @@ def config_from_args(args: argparse.Namespace) -> ScoringConfig:
         turns=args.turns,
         time_value_usd_per_hour=args.time_value,
         prefill_multiplier=args.prefill_multiplier,
+        overhead_seconds=args.overhead_seconds,
         price_failures=not args.no_failures,
         routing=args.routing,
         miss_policy=args.miss_policy,

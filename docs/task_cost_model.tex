@@ -122,6 +122,7 @@ $N$ & turns; default grows the context to $3 \times 10^5$ tokens & $145$ \\
 $o$ & completion tokens per turn; default: $10^4$ total output over $N$ & $69$ \\
 $v$ & value of the caller's time, USD per hour & $20$ \\
 $\gamma$ & prefill speed as a multiple of decode throughput & $100$ \\
+$\tau_0$ & fixed per-request wait (network, queueing), seconds & $0$ \\
 $\rho$ & routing policy: \textsf{order} or \textsf{sticky} & \textsf{sticky} (OpenRouter default) \\
 $(e_1, \dots, e_m)$ & fallback chain; $e_1$ is the scored endpoint & $(e_1, B)$, $B$ a cold outside option \\
 miss policy & prefix on a miss \emph{rewritten} ($m = w$) or \emph{processed} ($m = b$) & rewritten \\
@@ -161,14 +162,16 @@ cached prefix for this task unless the routing policy says otherwise.
 \end{assumption}
 
 \begin{assumption}[Time is linear in tokens]\label{as:time}
-A request costs $\ell$ seconds to first token plus the prefill of any prompt
-tokens the cache does not hold, and $o \cdot s$ seconds to generate, where
-$s = 1/g$ is seconds per output token. Prompt processing runs at
-$g_p = \gamma\, g$ tokens per second, roughly a hundred times decode, so a
-missed prefix of $S_k$ tokens adds $S_k / g_p$ seconds. The published time to
-first token is taken to cover queueing and the prefill of the new tokens $a$
-under the publisher's typical cache mix; only the missed prefix is charged on
-top of it. Time is valued at $v$ USD per hour; write $v' = v / 3600$.
+A request waits $\tau_0$ seconds of fixed overhead, then prefills every prompt
+token the cache does not hold at $g_p = \gamma\, g$ tokens per second (roughly
+a hundred times decode), then generates $o$ tokens at $s = 1/g$ seconds each.
+On a warm turn the uncached tokens are the $a$ new ones; on a miss or a cold
+fallback they are $a + S_k$. Time is valued at $v$ USD per hour; write
+$v' = v / 3600$. The published time to first token is \emph{not} charged: it
+is the prefill of whatever prompts the publisher's traffic contained, at that
+traffic's cache mix, and charging it on every turn alongside an explicit
+prefill model would double count and misprice warm turns. It is retained as a
+Pareto objective and for display.
 \end{assumption}
 
 \begin{assumption}[Missing telemetry is worst-case]\label{as:missing}
@@ -216,8 +219,10 @@ one.
 
 \subsection{Latency and throughput: expected time from two quantiles}
 
-The time cost needs expectations, and a blend of two quantiles is not one. Fit
-a lognormal to each: with median $\ell^{50}$ and 90th percentile $\ell^{90}$,
+Expectations, not quantile blends, enter the cost. Fit a lognormal to each
+published pair. For time to first token (used for the frontier and display,
+not charged; Assumption~\ref{as:time}), with median $\ell^{50}$ and 90th
+percentile $\ell^{90}$,
 \begin{equation}\label{eq:lognormal-l}
   \sigma_\ell = \frac{\ln(\ell^{90} / \ell^{50})}{\Phi^{-1}(0.9)},
   \qquad
@@ -241,23 +246,23 @@ endpoint look worse.
 \section{Turn cost}
 
 Fix the scored endpoint $A = e_1$ with prices $b, r, w, c, f$, miss price $m$,
-inputs $h, u, \E[\ell], \E[s]$, and $q = 1 - u$.
+inputs $h, u, \E[s]$, $g_p = \gamma g^{50}$, and $q = 1 - u$. Write
+$\rho = v'/g_p$ for the time value of prefilling one prompt token.
 
 \subsection{Successful turn}
 
 \begin{equation}\label{eq:turn-ok}
   X_k^{\text{ok}}
   = \underbrace{f + w\,a + c\,o}_{\text{fixed}}
-  + \underbrace{v'\big(\ell + o\, s\big)}_{\text{time}}
+  + \underbrace{v'\,\tau_0 + \rho\, a + v'\, o\, s}_{\text{overhead, new-token prefill, decode}}
   + \underbrace{S_k\,\big[\, m - H_k\,(m - r)\,\big]}_{\text{prefix money}}
-  + \underbrace{v'\,(1 - H_k)\, S_k / g_p}_{\text{prefix re-prefill}} .
+  + \underbrace{\rho\,(1 - H_k)\, S_k}_{\text{prefix re-prefill}} .
 \end{equation}
-Taking expectations, and writing $\rho = v' / g_p$ for the time value of
-re-prefilling one prefix token,
+Taking expectations,
 \begin{equation}\label{eq:turn-ok-mean}
   \mu_k^{\text{ok}} = \alpha + \pi\, S_k,
   \qquad
-  \alpha = f + w\,a + c\,o + v'\big(\E[\ell] + o\,\E[s]\big),
+  \alpha = f + w\,a + c\,o + v'\,\tau_0 + \rho\, a + v'\, o\,\E[s],
   \qquad
   \pi = h\, r + (1 - h)\,(m + \rho) .
 \end{equation}
@@ -270,19 +275,20 @@ prefix at $g_p = 3000$ tokens/s the wait alone is over a minute.
 
 Take the chain $(A, B)$ with $u_B = 1$; the general chain is in
 Section~\ref{sec:chain}. With probability $q$ the request to $A$ fails. The
-caller has waited $\E[\ell_A]$ for nothing, then the turn is served cold by
-$B$: every prompt token is new to $B$ and is written at $w_B$.
+caller has waited the overhead $\tau_0$ for nothing, then the turn is served
+cold by $B$: every prompt token is new to $B$, written at $w_B$ and prefilled
+at $g_{p,B}$.
 \begin{equation}\label{eq:turn-fail}
 \begin{split}
   X_k^{\text{fail}}
-  = v' \E[\ell_A]
-  &+ \underbrace{f_B + w_B\,(S_k + a) + c_B\, o + v'\big(\E[\ell_B] + o\,\E[s_B]\big) + \rho_B\, S_k}_{\text{cold turn on } B} \\
+  = v' \tau_0
+  &+ \underbrace{f_B + w_B\,(S_k + a) + c_B\, o + v'\,\tau_0 + \rho_B\,(S_k + a) + v'\, o\,\E[s_B]}_{\text{cold turn on } B} \\
   &+ \underbrace{\ind[\textsf{order}]\;\ind[k < N]\;h\,(m - r + \rho)\, d}_{\text{return penalty}} .
 \end{split}
 \end{equation}
 This branch is deterministic given the failure, so
 $\mu_k^{\text{fail}} = \beta + (w_B + \rho_B) S_k + \ind[\textsf{order}]\ind[k<N]\,h(m-r+\rho)d$
-with $\beta = v'\E[\ell_A] + f_B + w_B a + c_B o + v'(\E[\ell_B] + o\E[s_B])$.
+with $\beta = 2 v'\tau_0 + f_B + w_B a + c_B o + \rho_B a + v' o \E[s_B]$.
 
 \paragraph{The return penalty depends on the routing policy.}
 Under an explicit provider \textsf{order}, OpenRouter disables load balancing
@@ -379,8 +385,8 @@ quadratic term, which is driven by $h$ and $u$.
 For the chain $e_1, \dots, e_m$, let $R_j = \prod_{i<j} q_{e_i}$ be the
 probability that attempt $j$ is reached. Each reached attempt succeeds with
 probability $u_{e_j}$ at cost $\mu^{S}_{j,k}$ (warm on $e_1$, cold on any
-$e_j$, $j \ge 2$) or fails at cost $\mu^{F}_{j,k} = v'\E[\ell_{e_j}]$ (the
-wasted wait). Then
+$e_j$, $j \ge 2$) or fails at cost $\mu^{F}_{j,k} = v'\tau_0$ (the wasted
+wait). Then
 \begin{equation}\label{eq:chain}
   \E[X_k] = \sum_{j=1}^{m} R_j \Big[ u_{e_j}\,\mu^{S}_{j,k} + (1 - u_{e_j})\,\mu^{F}_{j,k} \Big]
   + R_{m+1}\, \Xi ,
@@ -591,7 +597,7 @@ The unit of optimisation is the task. For each endpoint the tools should report
   \item the process bound $\sigma_{\text{proc}}$, the parameter term
         $\sigma_{\text{par}}$, and $J$;
   \item total ordinary, cache-read, cache-write, and completion tokens;
-  \item the inputs $h, u, \E[\ell], \E[s]$, the cache mode and miss policy used,
+  \item the inputs $h, u, \E[s], g_p$ (and the published $\E[\ell]$ for reference), the cache mode and miss policy used,
         and the timestamps of the windows they summarise.
 \end{itemize}
 Per-million normalisation is secondary: repeatedly submitted transcript tokens
