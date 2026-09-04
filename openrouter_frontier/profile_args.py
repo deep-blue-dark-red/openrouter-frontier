@@ -17,7 +17,7 @@ def add_task_args(parser: argparse.ArgumentParser) -> None:
                    help="Completion tokens per turn, o (overrides --output-tokens)")
     g.add_argument("-N", "--turns", type=int, default=None,
                    help="Explicit number of turns (default: (task_tokens - output_tokens) / a)")
-    g.add_argument("-t", "--time-value", type=float, default=20.0, help="Value of your time, USD per hour (0 disables)")
+    g.add_argument("-t", "--time-value", type=float, default=5.0, help="Value of your time, USD per hour (0 disables)")
     g.add_argument("--prefill-multiplier", type=float, default=100.0,
                    help="Prompt-processing speed as a multiple of decode throughput; a cache miss re-prefills the prefix at this rate")
     g.add_argument("--overhead-seconds", type=float, default=0.0,

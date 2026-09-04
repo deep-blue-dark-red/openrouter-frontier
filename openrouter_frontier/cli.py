@@ -156,7 +156,7 @@ def _task_options(f):
         click.option("--output-tokens", default=10_000, type=int, show_default=True, help="Total completion tokens over the task."),
         click.option("--completion-tokens", "-o", default=None, type=int, help="Completion tokens per turn (overrides --output-tokens)."),
         click.option("--turns", "-N", default=None, type=int, help="Explicit number of turns."),
-        click.option("--time-value", "-t", default=20.0, type=float, show_default=True, help="Value of your time in USD/hr; 0 disables."),
+        click.option("--time-value", "-t", default=5.0, type=float, show_default=True, help="Value of your time in USD/hr; 0 disables."),
         click.option("--prefill-multiplier", default=100.0, type=float, show_default=True, help="Prompt-processing speed as a multiple of decode throughput."),
         click.option("--overhead-seconds", default=0.0, type=float, help="Fixed per-request wait charged on top of prefill and decode."),
         click.option("--price-failures/--no-failures", default=True, help="Price failures from 24h uptime."),

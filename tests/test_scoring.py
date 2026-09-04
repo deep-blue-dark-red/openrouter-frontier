@@ -190,7 +190,7 @@ def test_objective_adds_risk_terms():
 
 def test_config_defaults_and_validation():
     cfg = ScoringConfig()
-    assert cfg.time_value_usd_per_hour == 20.0 and cfg.task_tokens == 300_000 and cfg.output_tokens == 10_000
+    assert cfg.time_value_usd_per_hour == 5.0 and cfg.task_tokens == 300_000 and cfg.output_tokens == 10_000
     # N = (300k - 10k) / 2000 = 145 turns; o = 10k / 145 = 69 per turn
     assert cfg.n_turns == 145 and cfg.completion_per_turn == 69 and cfg.routing == "sticky"
     assert ScoringConfig(completion_tokens=500).n_turns == 120

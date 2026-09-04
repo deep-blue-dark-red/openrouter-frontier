@@ -70,7 +70,7 @@ class ScoringConfig:
     output_tokens: int = 10_000
     completion_tokens: Optional[int] = None
     turns: Optional[int] = None
-    time_value_usd_per_hour: float = 20.0
+    time_value_usd_per_hour: float = 5.0
     prefill_multiplier: float = 100.0
     overhead_seconds: float = 0.0
     price_failures: bool = True
