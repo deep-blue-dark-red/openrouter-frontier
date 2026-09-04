@@ -57,6 +57,8 @@ class ProviderCandidate:
     token_cost_usd: float        # token part of it
     scored_cost_per_m: float     # task cost per 1M submitted tokens (secondary)
     token_cost_per_m: float
+    time_cost_usd: float
+    task_time: str
     cache_hit_rate: float
     hit_price: float
     miss_price: float
@@ -111,11 +113,13 @@ def compute_provider_pareto(candidates: List[ProviderCandidate]) -> List[Provide
 def print_provider_table(candidates: List[ProviderCandidate], model_name: str, cfg: ScoringConfig, filter_desc: str) -> None:
     cols = [
         Column("Provider", 16),
-        Column("Task $", 10, ">"),
-        Column("Tokens $", 9, ">"),
-        Column("E[TTFT]", 8, ">"),
+        Column("Task $", 9, ">"),
+        Column("Token $", 9, ">"),
+        Column("Time $", 8, ">"),
+        Column("TTFT", 7, ">"),
         Column("TPS", 5, ">"),
-        Column("CacheHit", 8, ">"),
+        Column("Task Time", 9, ">"),
+        Column("Cache Hit", 9, ">"),
         Column("Uptime", 7, ">"),
         Column("Pareto Frontier", 15),
         Column("Niche / Advantage", 32),
@@ -125,8 +129,10 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
             c.provider_name,
             _usd(c.scored_cost_usd),
             _usd(c.token_cost_usd),
+            _usd(c.time_cost_usd),
             fmt_seconds(c.ttft_seconds),
             fmt_tps(c.throughput_tps),
+            c.task_time,
             f"{c.cache_hit_rate * 100.0:.1f}%",
             fmt_pct(c.uptime_pct),
             OPTIMAL if c.is_pareto else DOMINATED,
@@ -139,7 +145,7 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
         title=f"Provider Pareto Frontier: {model_name}",
         subtitle_lines=[
             describe_profile(cfg),
-            f"Objectives: Task cost ↓  E[TTFT] ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  {filter_desc}",
+            f"Objectives: Task $ ↓  TTFT ↓  TPS ↑  Cache Hit ↑  Uptime ↑  •  {filter_desc}",
         ],
         footer=f"{OPTIMAL} marks non-dominated providers: no other provider is at least as good on every objective and better on one.",
     )
@@ -311,6 +317,8 @@ def main() -> None:
             token_cost_usd=s.token_cost_usd,
             scored_cost_per_m=s.task_cost_per_m,
             token_cost_per_m=s.token_cost_usd / s.submitted_tokens * 1e6 if s.submitted_tokens else 0.0,
+            time_cost_usd=s.time_cost_usd,
+            task_time=s.formatted_task_time,
             cache_hit_rate=s.cache_hit_rate,
             hit_price=s.hit_price,
             miss_price=s.miss_price,

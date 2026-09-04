@@ -96,31 +96,33 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
 ProviderScore Task Cost: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Task: 145 turns × (2000 new + 69 out) → 300k context, 10k output  •  Time: $5/hr  •  Routing: sticky  •  Miss: rewrite  •  Cache: aggregate
 Quantization: primary
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider              Task $   Tokens $  Prefill $     Gen $    Fail $    Miss $  CacheHit   E[TTFT]    TPS   Uptime   Read $/M   Miss $/M       $/M
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Parasail               $2.38      $1.10    $0.9584   $0.3150   $0.0059   $0.4065     84.3%     3.26s     54    96.0%    $0.0300    $0.1500   $0.1088
-Z.ai                   $2.42    $0.5018      $1.41   $0.5082   $0.0053   $0.1535     88.1%     6.10s     29    98.8%    $0.0150    $0.0750   $0.1106
-Sail Research          $2.64      $1.10      $1.20   $0.3354   $0.0084   $0.4015     84.5%     4.21s     43    97.4%    $0.0300    $0.1500   $0.1205
-NovitaAI               $2.71    $0.5579      $1.68   $0.4720   $0.0052   $0.2096     83.8%     3.55s     32    99.0%    $0.0150    $0.0750   $0.1240
-Phala                  $3.68      $1.33      $1.97   $0.3637   $0.0106   $0.6370     75.3%     2.80s     40    98.7%    $0.0300    $0.1500   $0.1681
-Modal                  $3.75      $1.69      $1.83   $0.2280   $0.0034   $0.9901     61.7%     0.52s     65    99.8%    $0.0300    $0.1500   $0.1712
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. Prefill $ = prompt processing at 100x decode: the new tokens every turn plus the whole prefix again after a cache miss (most of it); Gen $ = decoding output. Published TTFT is shown but not charged (it is the prefill of other traffic). Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider             Task $    Token $    Fail $    Time $  Cache Hit     TTFT    TPS  Turn Time  Task Time   Uptime       $/M
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Parasail              $2.36      $1.11   $0.0058     $1.25      84.0%    5.57s     57       6.2s      14.9m    95.9%   $0.1079
+Z.ai                  $2.44    $0.4961   $0.0053     $1.94      88.5%    5.92s     28       9.6s      23.3m    98.8%   $0.1115
+NovitaAI              $2.68    $0.5538   $0.0052     $2.12      84.1%    3.22s     32      10.5s      25.4m    99.0%   $0.1222
+Sail Research         $3.07      $1.17   $0.0086     $1.90      81.8%    3.59s     39       9.4s      22.7m    97.5%   $0.1402
+Phala                 $3.68      $1.30   $0.0106     $2.37      76.5%    3.63s     38      11.8s      28.4m    98.7%   $0.1681
+Baseten               $3.92      $2.02   $0.0076     $1.90      48.9%    1.15s     91       9.4s      22.8m    99.6%   $0.1791
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Task $ = Token $ + Fail $ + Time $, the expected cost of the whole task; lower is better.  Token $ = money billed for tokens (new, output, cached reads, cache-miss re-reads).  Fail $ = money for cold retries after failures.  Time $ = Task Time valued at $5/hr; nothing else contains time.  Task Time = expected wall-clock: prefill of new tokens and of the prefix after a cache miss, decoding, overhead.  TTFT = published median-to-p90 lognormal mean, shown, not charged.  Cache Hit = published 24h rate.  $/M = Task $ per 1M submitted tokens (secondary).
 ```
 
-`Task $` is the expected cost of the whole task: `Tokens $` (new tokens, output, and the
-cached-read baseline plus `Miss $`, the cache-miss premium) + `Prefill $` + `Gen $` + `Fail $`. The default
-task appends 2000 tokens of user text and tool results per turn until the context reaches 300k,
-generating 10k output tokens in total (145 turns of 69), with time at $5/hr and OpenRouter's
-default sticky routing. The two time columns are what you wait for: `Prefill $` is prompt
-processing at 100× the published decode rate, covering the new tokens every turn and the whole
-prefix again after a cache miss, which is why a high hit rate can beat raw throughput; `Gen $`
-is decoding the output at the published throughput. The published time to first token is shown
-(`E[TTFT]`) but not charged, since it is the prefill of other people's prompts and would double
-count; `--overhead-seconds` adds a fixed per-request wait if you want one. `$/M` is the same cost per 1M submitted
-tokens and is secondary: it falls as tasks get longer while the bill rises. `E[TTFT]` is the
-lognormal mean fitted to the published p50/p90.
+`Task $` = `Token $` + `Fail $` + `Time $`, the expected cost of the whole task on that endpoint.
+`Token $` is money billed for tokens: the new tokens and output every turn, cached reads of the
+prefix, and re-reading the prefix at the miss price when the cache misses. `Fail $` is money for
+cold retries after failures. `Time $` is `Task Time` valued at $5/hr, and no other column
+contains time. `Task Time` is the expected wall-clock: prefilling the new tokens every turn and
+the whole prefix again after a cache miss, at 100× the published decode rate, plus decoding the
+output and any `--overhead-seconds`. `TTFT` is the published first-token latency (lognormal mean
+of p50/p90), shown for reference but not charged since it is other traffic's prefill. `Cache Hit`
+is the published 24h rate. `$/M` is `Task $` per 1M submitted tokens and is secondary: it falls
+as tasks get longer while the bill rises.
+
+The default task appends 2000 tokens of user text and tool results per turn until the context
+reaches 300k, generating 10k output tokens in total (145 turns of 69), under OpenRouter's default
+sticky routing.
 
 By default only the model's primary quantization (usually `fp8`) is shown, matching the
 variant OpenRouter prices on the web. Pass `--all-quants` to see community variants too.
@@ -140,25 +142,25 @@ task-profile flags as `score_providers.py`.
 ```text
 Provider Pareto Frontier: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Task: 145 turns × (2000 new + 69 out) → 300k context, 10k output  •  Time: $5/hr  •  Routing: sticky  •  Miss: rewrite  •  Cache: aggregate
-Objectives: Task cost ↓  E[TTFT] ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quantization: primary
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Provider              Task $   Tokens $   E[TTFT]    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage               
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Parasail               $2.38      $1.10     3.26s     54     84.3%    96.0%  ★ OPTIMAL        Lowest Cost                     
-Z.ai                   $2.42    $0.5018     6.10s     29     88.1%    98.8%  ★ OPTIMAL        Best Cache Hit                  
-Sail Research          $2.64      $1.10     4.21s     43     84.5%    97.4%  ★ OPTIMAL        Balanced Trade-off              
-NovitaAI               $2.71    $0.5579     3.55s     32     83.8%    99.0%  ★ OPTIMAL        Balanced Trade-off              
-Phala                  $3.68      $1.33     2.80s     40     75.3%    98.7%  ★ OPTIMAL        Balanced Trade-off              
-Modal                  $3.75      $1.69     0.52s     65     61.7%    99.8%  ★ OPTIMAL        Lowest Latency • Highest Uptime 
-Baseten                $3.93      $2.00     1.09s     89     49.5%    99.5%  ★ OPTIMAL        Highest TPS                     
-SiliconFlow            $5.51      $1.55     2.08s     30     66.8%    99.6%  ★ OPTIMAL        Balanced Trade-off              
-Morph                  $5.56      $1.32     5.40s     30     64.4%    94.5%  Dominated        --                              
-NextBit                $6.02      $1.92     3.18s     40     52.5%    99.3%  Dominated        --                              
-DeepInfra              $6.57      $1.04     1.81s     33     46.3%    99.4%  Dominated        --                              
-GMICloud               $7.28    $0.8147     9.37s     20     63.9%    97.9%  Dominated        --                              
-Reka AI                $9.64      $2.41     3.88s     31     33.7%    99.8%  Dominated        --                              
-io.net                $21.55      $2.51     1.77s     12     29.9%    92.1%  Dominated        --                              
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Objectives: Task $ ↓  TTFT ↓  TPS ↑  Cache Hit ↑  Uptime ↑  •  Quantization: primary
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Provider             Task $    Token $    Time $     TTFT    TPS  Task Time  Cache Hit   Uptime  Pareto Frontier  Niche / Advantage               
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Parasail              $2.36      $1.11     $1.25    5.57s     57      14.9m      84.0%    95.9%  ★ OPTIMAL        Lowest Cost                     
+Z.ai                  $2.44    $0.4961     $1.94    5.92s     28      23.3m      88.5%    98.8%  ★ OPTIMAL        Best Cache Hit                  
+NovitaAI              $2.68    $0.5538     $2.12    3.22s     32      25.4m      84.1%    99.0%  ★ OPTIMAL        Balanced Trade-off              
+Sail Research         $3.07      $1.17     $1.90    3.59s     39      22.7m      81.8%    97.5%  ★ OPTIMAL        Balanced Trade-off              
+Phala                 $3.68      $1.30     $2.37    3.63s     38      28.4m      76.5%    98.7%  ★ OPTIMAL        Balanced Trade-off              
+Baseten               $3.92      $2.02     $1.90    1.15s     91      22.8m      48.9%    99.6%  ★ OPTIMAL        Highest TPS                     
+Modal                 $5.31      $1.63     $3.68    0.80s     35      44.1m      64.0%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime 
+SiliconFlow           $5.64      $1.58     $4.05    2.11s     30      48.6m      65.8%    99.6%  ★ OPTIMAL        Balanced Trade-off              
+Morph                 $5.77      $1.61     $4.16    8.08s     39      50.0m      52.3%    95.4%  Dominated        --                              
+NextBit               $6.18      $1.99     $4.19    3.31s     41      50.2m      50.0%    99.1%  ★ OPTIMAL        Balanced Trade-off              
+GMICloud              $7.14    $0.8041     $6.33    9.18s     20      1.27h      64.7%    97.9%  Dominated        --                              
+DeepInfra            $15.38      $1.08    $14.30    2.83s     14      2.86h      43.6%    99.4%  Dominated        --                              
+Reka AI              $20.04      $2.44    $17.60    3.83s     13      3.52h      32.7%    99.7%  Dominated        --                              
+io.net               $20.70      $2.43    $18.26    2.13s     12      3.65h      33.0%    92.0%  Dominated        --                              
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ★ OPTIMAL marks non-dominated providers: no other provider is at least as good on every objective and better on one.
 ```
 

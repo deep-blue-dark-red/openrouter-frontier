@@ -207,15 +207,15 @@ MODEL_ID_COL = Column("Model ID", 30)
 PROVIDER_COLS = [
     Column("Provider", 16),
     Column("Task $", 9, ">"),
-    Column("Tokens $", 9, ">"),
-    Column("Prefill $", 9, ">"),
-    Column("Gen $", 7, ">"),
-    Column("Miss $", 8, ">"),
-    Column("CacheHit", 8, ">"),
-    Column("E[TTFT]", 8, ">"),
+    Column("Token $", 9, ">"),
+    Column("Fail $", 8, ">"),
+    Column("Time $", 8, ">"),
+    Column("Cache Hit", 9, ">"),
+    Column("TTFT", 7, ">"),
     Column("TPS", 5, ">"),
+    Column("Turn Time", 9, ">"),
+    Column("Task Time", 9, ">"),
     Column("Uptime", 7, ">"),
-    Column("$/M", 8, ">"),
 ]
 
 
@@ -302,10 +302,9 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
             s = active[i]
             line = format_row(
                 [
-                    s.provider_name[:16], s.formatted_task_cost, s.formatted_token_cost,
-                    s.formatted_prefill_cost, s.formatted_decode_cost,
-                    s.formatted_miss_premium, s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds),
-                    fmt_tps(s.throughput_tps), fmt_pct(s.uptime_pct), f"${s.task_cost_per_m:.4f}",
+                    s.provider_name[:16], s.formatted_task_cost, s.formatted_token_cost, s.formatted_failure_cost,
+                    s.formatted_time_cost, s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds),
+                    fmt_tps(s.throughput_tps), s.formatted_turn_time, s.formatted_task_time, fmt_pct(s.uptime_pct),
                 ],
                 PROVIDER_COLS,
             )[: width - 1]
@@ -334,6 +333,7 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     write(rule)
     write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
     write(f"  Expected Task Cost:         \x1b[1;32m{s.formatted_task_cost}{RESET}   (per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
+    write(f"  Expected Task Time:         {s.formatted_task_time}   (per turn {s.formatted_turn_time}; published TTFT {fmt_seconds(s.ttft_seconds)} shown, not charged)")
     write(f"    fixed (new tok + output):  {_usd(s.fixed_cost_usd)}")
     write(f"    time:                      {_usd(s.time_cost_usd)}  (gen {_usd(s.decode_cost_usd)}, prefill new tokens {_usd(s.prefill_new_cost_usd)}, "
           f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})")

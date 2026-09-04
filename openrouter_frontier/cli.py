@@ -219,7 +219,6 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
         click.echo(json.dumps([s.to_dict() for s in scores], indent=2))
         return
 
-    show_time = cfg.time_value_usd_per_hour > 0
     show_obj = cfg.lambda_proc > 0 or cfg.lambda_par > 0
     console.print()
     console.print(
@@ -235,39 +234,32 @@ def score_command(model: str, all_quants: bool, provider: Optional[str], top: Op
     table.add_column("Provider", style="bold white", no_wrap=True)
     table.add_column("Task $", style="bold green", justify="right", no_wrap=True)
     if show_obj:
-        table.add_column("Objective", justify="right")
-    table.add_column("Tokens $", justify="right")
-    if show_time:
-        for col in (("Overhead $",) if cfg.overhead_seconds > 0 else ()) + ("Prefill $", "Gen $"):
-            table.add_column(col, justify="right")
-    if cfg.price_failures:
-        table.add_column("Fail $", justify="right")
-    table.add_column("Miss $", justify="right")
-    table.add_column("CacheHit", justify="right")
-    for col in ("E[TTFT]", "TPS", "Uptime", "$/M"):
+        table.add_column("Objective $", justify="right")
+    for col in ("Token $", "Fail $", "Time $", "Cache Hit", "TTFT", "TPS", "Turn Time", "Task Time", "Uptime", "$/M"):
         table.add_column(col, justify="right")
 
     for s in scores:
         row: List = [s.provider_name + ("*" if s.imputed else ""), s.formatted_task_cost]
         if show_obj:
             row.append(s.formatted_objective)
-        row.append(s.formatted_token_cost)
-        if show_time:
-            row += ([s.formatted_ttft_cost] if cfg.overhead_seconds > 0 else []) + [s.formatted_prefill_cost, s.formatted_decode_cost]
-        if cfg.price_failures:
-            row.append(s.formatted_failure_cost)
         row += [
-            s.formatted_miss_premium,
+            s.formatted_token_cost,
+            s.formatted_failure_cost,
+            s.formatted_time_cost,
             _color_hit_rate(s.cache_hit_rate * 100.0),
             fmt_seconds(s.ttft_seconds),
             fmt_tps(s.throughput_tps, " tps"),
+            s.formatted_turn_time,
+            s.formatted_task_time,
             fmt_pct(s.uptime_pct),
             f"${s.task_cost_per_m:.4f}",
         ]
         table.add_row(*row)
 
     console.print(table)
-    console.print("[dim]Task $ = expected cost of the whole task; lower is better. Miss $ = cache-miss premium. "
+    console.print(f"[dim]Task $ = Token $ + Fail $ + Time $. Time $ = Task Time at ${cfg.time_value_usd_per_hour:.0f}/hr; no other column contains time. "
+                  "Task Time = prefill (new tokens, and the prefix again after a cache miss) + decoding + overhead. TTFT is shown, not charged. "
+                  "$/M = Task $ per 1M submitted tokens. * = missing telemetry imputed worst-case.[/dim]\n")
                   "$/M = task cost per 1M submitted tokens (secondary). * = missing telemetry imputed worst-case.[/dim]\n")
 
 
@@ -323,7 +315,8 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
     if score:
         console.print(
             f"[bold cyan]Expected Task Cost:[/bold cyan] [bold green]{score.formatted_task_cost}[/bold green] "
-            f"({score.turns} turns × {score.new_tokens}+{score.completion_tokens} tok, {score.routing} routing)"
+            f"({score.turns} turns × {score.new_tokens}+{score.completion_tokens} tok, {score.routing} routing)  "
+            f"[bold cyan]Expected Task Time:[/bold cyan] {score.formatted_task_time} ({score.formatted_turn_time}/turn)"
         )
         console.print(
             f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (gen {score.formatted_decode_cost}, prefill new tokens {_usd(score.prefill_new_cost_usd)}, re-prefill on cache miss {_usd(score.prefill_miss_cost_usd)}, overhead {score.formatted_ttft_cost}) | failures {score.formatted_failure_cost} | "

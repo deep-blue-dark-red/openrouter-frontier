@@ -336,6 +336,7 @@ class ScoreBreakdown:
     prefill_cost_usd: float         # = prefill_new + prefill_miss
     prefill_new_cost_usd: float     # prefilling the a new tokens, every turn
     prefill_miss_cost_usd: float    # re-prefilling the prefix after a cache miss or on a cold fallback
+    task_seconds: float             # expected wall-clock for the whole task (overhead + prefill + decode)
     read_baseline_usd: float
     miss_premium_usd: float
     failure_premium_usd: float
@@ -364,6 +365,19 @@ class ScoreBreakdown:
     @property
     def mean_turn_cost_usd(self) -> float:
         return self.task_cost_usd / self.turns if self.turns else 0.0
+
+    @property
+    def turn_seconds(self) -> float:
+        """Expected wall-clock per turn."""
+        return self.task_seconds / self.turns if self.turns else 0.0
+
+    @property
+    def formatted_task_time(self) -> str:
+        return _fmt_duration(self.task_seconds)
+
+    @property
+    def formatted_turn_time(self) -> str:
+        return _fmt_duration(self.turn_seconds)
 
     @property
     def task_cost_per_m(self) -> float:
@@ -467,6 +481,8 @@ class ScoreBreakdown:
                 "imputed": list(self.imputed),
             },
             "task_cost_usd": r6(self.task_cost_usd),
+            "task_seconds": r6(self.task_seconds),
+            "turn_seconds": r6(self.turn_seconds),
             "decomposition_usd": {
                 "fixed": r6(self.fixed_cost_usd), "time": r6(self.time_cost_usd),
                 "time_ttft": r6(self.ttft_cost_usd), "time_decode": r6(self.decode_cost_usd),
@@ -489,6 +505,14 @@ class ScoreBreakdown:
             "mean_turn_cost_usd": r6(self.mean_turn_cost_usd),
             "task_cost_per_m": r6(self.task_cost_per_m),
         }
+
+
+def _fmt_duration(sec: float) -> str:
+    if sec < 60:
+        return f"{sec:.1f}s"
+    if sec < 3600:
+        return f"{sec / 60:.1f}m"
+    return f"{sec / 3600:.2f}h"
 
 
 def _fmt_usd(x: float) -> str:
@@ -541,6 +565,7 @@ def _resolve(pricing: EndpointPricing, inp: EndpointInputs, cfg: ScoringConfig) 
 class _Acc:
     fixed: float = 0.0; read: float = 0.0; miss: float = 0.0
     ttft: float = 0.0; decode: float = 0.0; prefill_new: float = 0.0; prefill_miss: float = 0.0
+    secs: float = 0.0
     fail: float = 0.0; ret: float = 0.0
     ordinary: float = 0.0; reads: float = 0.0; writes: float = 0.0; comp: float = 0.0
     var: float = 0.0; par: float = 0.0
@@ -575,8 +600,9 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
 
     # per-turn constants
     fixA = A.f + A.w * a + A.c * o
-    ovh = vps * cfg.overhead_seconds              # fixed per-request wait, same on every endpoint
-    genA, genB = vps * o * A.Es, vps * o * B.Es
+    s_ovh = cfg.overhead_seconds                  # seconds; dollar versions are vps * seconds
+    s_genA, s_genB = o * A.Es, o * B.Es
+    ovh, genA, genB = vps * s_ovh, vps * s_genA, vps * s_genB
     fixB_cold = B.f + B.w * a + B.c * o          # cold turn on B: new tokens written on B
     piA = hA * A.r + (1.0 - hA) * A.m
     piB = hB * B.r + (1.0 - hB) * B.m
@@ -585,7 +611,9 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
     timeA = ovh + genA + a * prefA               # warm turn on A, before any prefix miss
     timeFail = ovh + ovh + genB + a * prefB      # wasted overhead on A + cold retry on B
     timeB = ovh + genB + a * prefB
-    ret_per = hA * (A.m - A.r + prefA) * d        # return penalty under 'order' (money + prefill time)
+    ret_money = hA * (A.m - A.r) * d              # return penalty under 'order': money part ...
+    ret_sec = hA * d * A.Ep                       # ... and the re-prefill of the d tokens A never saw
+    ret_per = ret_money + vps * ret_sec
     var_missA = (A.m - A.r + prefA) ** 2 * hA * (1.0 - hA)
     var_missB = (B.m - B.r + prefB) ** 2 * hB * (1.0 - hB)
 
@@ -603,6 +631,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         acc.decode += p_ok * genA
         acc.prefill_new += p_ok * a * prefA                    # new tokens, every turn
         acc.prefill_miss += p_ok * (1.0 - hA) * S * prefA      # missed prefix: wait for it again
+        acc.secs += p_ok * (s_ovh + s_genA + (a + (1.0 - hA) * S) * A.Ep)
         acc.read += p_ok * A.r * S
         acc.miss += p_ok * (1.0 - hA) * (A.m - A.r) * S
         acc.reads += p_ok * hA * S
@@ -618,12 +647,15 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
         acc.decode += p_fail * genB
         acc.prefill_new += p_fail * a * prefB
         acc.prefill_miss += p_fail * S * prefB             # whole prefix prefilled cold on B
+        acc.secs += p_fail * (2 * s_ovh + s_genB + (S + a) * B.Ep)
         acc.read += p_fail * A.r * S                       # baseline at A's read price ...
         acc.fail += p_fail * (B.w - A.r) * S               # ... plus the cold surcharge
         acc.writes += p_fail * (S + a)
         acc.comp += p_fail * o
         if cfg.routing == "order" and k < N:
-            acc.ret += p_fail * ret_per
+            acc.ret += p_fail * ret_money
+            acc.prefill_miss += p_fail * vps * ret_sec
+            acc.secs += p_fail * ret_sec
         # mixture term of the law of total variance: (μ_fail − μ_ok)^2
         mu_ok = fixA + timeA + piA * S + (1.0 - hA) * S * prefA
         mu_fail = fixB_cold + timeFail + B.w * S + S * prefB + (ret_per if (cfg.routing == "order" and k < N) else 0.0)
@@ -639,6 +671,7 @@ def _run(A: _Ep, B: _Ep, cfg: ScoringConfig, h_override: Optional[float] = None)
             acc.decode += p_B * genB
             acc.prefill_new += p_B * a * prefB
             acc.prefill_miss += p_B * (1.0 - hB) * S * prefB
+            acc.secs += p_B * (s_ovh + s_genB + (a + (1.0 - hB) * S) * B.Ep)
             acc.read += p_B * B.r * S
             acc.miss += p_B * (1.0 - hB) * (B.m - B.r) * S
             acc.reads += p_B * hB * S
@@ -706,6 +739,7 @@ def evaluate_endpoint(
         task_cost_usd=acc.total, fixed_cost_usd=acc.fixed, time_cost_usd=acc.time,
         ttft_cost_usd=acc.ttft, decode_cost_usd=acc.decode, prefill_cost_usd=acc.prefill,
         prefill_new_cost_usd=acc.prefill_new, prefill_miss_cost_usd=acc.prefill_miss,
+        task_seconds=acc.secs,
         read_baseline_usd=acc.read, miss_premium_usd=acc.miss, failure_premium_usd=acc.fail,
         return_penalty_usd=acc.ret,
         perfect_cache_cost_usd=perfect, cold_cache_cost_usd=cold,

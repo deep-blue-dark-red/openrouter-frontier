@@ -60,26 +60,20 @@ def evaluate_provider_utility(
 
 
 def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringConfig, quant_desc: str) -> None:
-    show_time = cfg.time_value_usd_per_hour > 0
     show_obj = cfg.lambda_proc > 0 or cfg.lambda_par > 0
-    cols = [Column("Provider", 16), Column("Task $", 10, ">")]
+    cols = [Column("Provider", 16), Column("Task $", 9, ">")]
     if show_obj:
-        cols.append(Column("Objective", 10, ">"))
-    cols.append(Column("Tokens $", 9, ">"))
-    if show_time:
-        if cfg.overhead_seconds > 0:
-            cols.append(Column("Overhead $", 10, ">"))
-        cols += [Column("Prefill $", 9, ">"), Column("Gen $", 8, ">")]
-    if cfg.price_failures:
-        cols.append(Column("Fail $", 8, ">"))
+        cols.append(Column("Objective $", 11, ">"))
     cols += [
-        Column("Miss $", 8, ">"),
-        Column("CacheHit", 8, ">"),
-        Column("E[TTFT]", 8, ">"),
+        Column("Token $", 9, ">"),
+        Column("Fail $", 8, ">"),
+        Column("Time $", 8, ">"),
+        Column("Cache Hit", 9, ">"),
+        Column("TTFT", 7, ">"),
         Column("TPS", 5, ">"),
+        Column("Turn Time", 9, ">"),
+        Column("Task Time", 9, ">"),
         Column("Uptime", 7, ">"),
-        Column("Read $/M", 9, ">"),
-        Column("Miss $/M", 9, ">"),
         Column("$/M", 8, ">"),
     ]
 
@@ -88,32 +82,29 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         row = [r.provider_name + ("*" if r.imputed else ""), r.formatted_task_cost]
         if show_obj:
             row.append(r.formatted_objective)
-        row.append(r.formatted_token_cost)
-        if show_time:
-            if cfg.overhead_seconds > 0:
-                row.append(r.formatted_ttft_cost)
-            row += [r.formatted_prefill_cost, r.formatted_decode_cost]
-        if cfg.price_failures:
-            row.append(r.formatted_failure_cost)
         row += [
-            r.formatted_miss_premium,
+            r.formatted_token_cost,
+            r.formatted_failure_cost,
+            r.formatted_time_cost,
             r.formatted_cache_hit_rate,
             fmt_seconds(r.ttft_seconds),
             fmt_tps(r.throughput_tps),
+            r.formatted_turn_time,
+            r.formatted_task_time,
             fmt_pct(r.uptime_pct),
-            f"${r.read_price:.4f}",
-            f"${r.miss_price:.4f}",
             f"${r.task_cost_per_m:.4f}",
         ]
         rows.append(row)
 
-    footer = ("Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. "
-              "Prefill $ = prompt processing at 100x decode: the new tokens every turn plus the whole prefix again after a cache miss (most of it); Gen $ = decoding output. "
-              "Published TTFT is shown but not charged (it is the prefill of other traffic). "
-              "Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). "
-              "CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.")
+    footer = (f"Task $ = Token $ + Fail $ + Time $, the expected cost of the whole task; lower is better.  "
+              f"Token $ = money billed for tokens (new, output, cached reads, cache-miss re-reads).  "
+              f"Fail $ = money for cold retries after failures.  "
+              f"Time $ = Task Time valued at ${cfg.time_value_usd_per_hour:.0f}/hr; nothing else contains time.  "
+              f"Task Time = expected wall-clock: prefill of new tokens and of the prefix after a cache miss, decoding, overhead.  "
+              f"TTFT = published median-to-p90 lognormal mean, shown, not charged.  "
+              f"Cache Hit = published 24h rate.  $/M = Task $ per 1M submitted tokens (secondary).")
     if any(r.imputed for r in results):
-        footer += " * = missing telemetry imputed as the worst observed for this model."
+        footer += "  * = missing telemetry imputed as the worst observed for this model."
     print_table(
         cols,
         rows,
