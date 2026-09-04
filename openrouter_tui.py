@@ -61,6 +61,7 @@ KEYS_BACKSPACE = ("\x7f", "\x08")
 KEY_ESC = "\x1b"
 KEY_CTRL_C = "\x03"
 PAGE = 5
+WHEEL = 1  # mouse wheel scroll step
 TABLE_FIRST_ROW = 4  # 1-based terminal row of the first data row (bar, header, rule above it)
 MODEL_NAME_MIN_W = 32  # Model Name column never shrinks below this
 
@@ -152,9 +153,9 @@ def navigate(key: str, idx: int, count: int, scroll: int, visible: int) -> Tuple
         clicked = False
         for button, _, row, released in events:
             if button >= 64 and (button - 64) % 4 == 0:  # wheel up, incl. modifier variants
-                idx = max(0, idx - PAGE)
+                idx = max(0, idx - WHEEL)
             elif button >= 65 and (button - 65) % 4 == 0:  # wheel down
-                idx = min(last, idx + PAGE)
+                idx = min(last, idx + WHEEL)
             elif button == 0 and not released and TABLE_FIRST_ROW <= row < TABLE_FIRST_ROW + visible:
                 hit = scroll + (row - TABLE_FIRST_ROW)
                 if 0 <= hit < count:
