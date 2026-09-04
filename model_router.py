@@ -3,7 +3,7 @@
 
 Given a minimum Artificial Analysis score (the same index ``model_frontier.py`` uses), the
 router picks a benchmarked model that meets it and that model's best provider as ranked by
-the ProviderUtility scorer. Two modes choose the model:
+the ProviderScore scorer. Two modes choose the model:
 
   cheapest   the cheapest model at or above the threshold
   efficient  most quality gained per dollar once the level is met: the efficient point (maximum
@@ -44,7 +44,7 @@ class Route:
     score: float
     model_cost: float          # model-level price used for ranking, see ``cost_unit``
     cost_unit: str
-    provider: ScoreBreakdown   # best endpoint by ProviderUtility scored cost per turn
+    provider: ScoreBreakdown   # best endpoint by ProviderScore scored cost per turn
     skipped: List[str] = field(default_factory=list)  # cheaper qualifying models with no active provider
 
     def to_dict(self) -> Dict[str, Any]:
@@ -108,7 +108,7 @@ def route(
     :param metric: ``intelligence``, ``coding`` or ``agentic``.
     :param mode: ``cheapest`` or ``efficient``; see :func:`rank_candidates`.
     :param price_source: How models are priced when ranking them; see ``model_frontier.py``.
-    :param config: ProviderUtility knobs used to rank the chosen model's providers.
+    :param config: ProviderScore knobs used to rank the chosen model's providers.
     :param all_quants: Consider non-primary quantization variants when picking the provider.
     :returns: ``None`` when no benchmarked model meets the score.
     """

@@ -2,15 +2,15 @@
 
 **The price of an LLM call is not the list price. It is the expected cost of the turn, and
 that depends on who serves it.** Two providers selling the same model at the same price can
-differ by 2× in what you actually pay, because one hits the prompt cache 88% of the time and the
-other 59%, one fails 3% of requests and throws away your cached prefix, one makes you wait four
-seconds for the first token. Nobody prices that. This does.
+differ by 25% in what you actually pay, because one hits the prompt cache 88% of the time and
+the other under 50%, one drops one request in eight and throws away your cached prefix, one makes
+you wait four seconds for the first token. Nobody prices that. This does.
 
 OpenRouter Frontier pulls the observed 24-hour metrics for every endpoint serving a model —
 prompt **cache hit rate**, p50 **latency** and **throughput**, **uptime**, effective and list
 **pricing** — and turns them into a single expected cost per turn, then reasons about it:
 
-- **ProviderUtility scoring** – the expected dollars a conversation turn costs on each endpoint:
+- **ProviderScore scoring** – the expected dollars a conversation turn costs on each endpoint:
   cache economics with Bayesian shrinkage for low-traffic endpoints, a value-of-time term, and
   the cost of retrying a failed request. Reported per 1M tokens so it sits on the same scale as
   list prices, and often reorders them. The full model is in [Scoring model](#scoring-model).
@@ -66,7 +66,7 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
   gain per dollar), and `-N pts` a dominated model's score gap. Type to filter (`zai`,
   `claude37`, `gemini25` all work; punctuation is ignored). **Tab** switches between the
   intelligence and coding index; the active metric is shown in the status line.
-- **Providers view** – **Enter** on a model ranks its endpoints by ProviderUtility scored
+- **Providers view** – **Enter** on a model ranks its endpoints by ProviderScore scored
   cost per 1M tokens. **Tab** or **a** toggles between the primary quantization and all variants.
 - **Detail view** – **Enter** on a provider shows the full cost breakdown and pricing.
 - Navigation: Up/Down or Ctrl-P/N, PgUp/PgDn, mouse wheel and click, Esc/Backspace to go
@@ -85,17 +85,17 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
 
 ```text
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-ProviderUtility Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
+ProviderScore Evaluation: Z.ai: GLM 5.3 Flash (z-ai/glm-5.3-flash)
 Mode: Full Utility Model  •  Turn: 2000 prompt + 500 completion tokens  •  Time Value: $0.00/hr
 Shrinkage: prior=50%, weight=1.0B tokens  •  Discounts: Applied  •  Failure Risk: Yes  •  Quantization: primary
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Provider            Scored $/M    Token $/M    Fail $/M  CacheHit   h(pub)   Hit $/M   Miss $/M   Latency    TPS   Uptime
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0344      $0.0340     $0.0008     87.9%    88.0%   $0.0075    $0.0375     4.37s     28    96.8%
-NovitaAI               $0.0364      $0.0360     $0.0004     78.9%    79.5%   $0.0075    $0.0375     1.58s     39    98.9%
-GMICloud               $0.0396      $0.0384     $0.0012     69.3%    69.5%   $0.0075    $0.0375     6.39s     20    93.6%
-DeepInfra              $0.0408      $0.0408     $0.0000     58.9%    59.9%   $0.0075    $0.0375     0.84s     30    99.4%
-Modal                  $0.0496      $0.0496     $0.0000     74.7%    75.6%   $0.0100    $0.0500     0.56s     47    99.9%
+Z.ai                   $0.0689      $0.0688     $0.0001     85.9%    88.0%   $0.0150    $0.0750     4.35s     34    99.8%
+NovitaAI               $0.0767      $0.0766     $0.0001     69.6%    81.7%   $0.0150    $0.0750     1.64s     37    99.7%
+GMICloud               $0.0844      $0.0842     $0.0002     53.8%    57.0%   $0.0150    $0.0750     4.10s     31    99.3%
+DeepInfra              $0.0863      $0.0861     $0.0002     49.7%    48.1%   $0.0150    $0.0750     0.82s     32    99.3%
+Parasail               $0.1418      $0.1409     $0.0009     82.4%    86.7%   $0.0300    $0.1500     1.47s     55    98.8%
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Lower Scored $/M is better. CacheHit is the shrunk hit rate used in scoring; h(pub) is the published 24h rate.
 ```
@@ -126,11 +126,13 @@ Objectives: Cost ↓  Latency ↓  TPS ↑  CacheHit ↑  Uptime ↑  •  Quant
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Provider            Scored $/M    Token $/M   Latency    TPS  CacheHit   Uptime  Pareto Frontier  Niche / Advantage
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Z.ai                   $0.0344      $0.0340     4.37s     28     87.9%    96.8%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
-NovitaAI               $0.0364      $0.0360     1.58s     39     78.9%    98.9%  ★ OPTIMAL        Balanced Trade-off
-GMICloud               $0.0396      $0.0384     6.39s     20     69.3%    93.6%  Dominated        --
-DeepInfra              $0.0408      $0.0408     0.84s     30     58.9%    99.4%  ★ OPTIMAL        Balanced Trade-off
-Modal                  $0.0496      $0.0496     0.56s     47     74.7%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
+Z.ai                   $0.0689      $0.0688     4.35s     34     85.9%    99.8%  ★ OPTIMAL        Lowest Cost • Best Cache Hit
+NovitaAI               $0.0767      $0.0766     1.64s     37     69.6%    99.7%  ★ OPTIMAL        Balanced Trade-off
+GMICloud               $0.0844      $0.0842     4.10s     31     53.8%    99.3%  Dominated        --
+DeepInfra              $0.0863      $0.0861     0.82s     32     49.7%    99.3%  ★ OPTIMAL        Balanced Trade-off
+Parasail               $0.1418      $0.1409     1.47s     55     82.4%    98.8%  ★ OPTIMAL        Balanced Trade-off
+Modal                  $0.1690      $0.1690     0.44s     53     53.2%    99.9%  ★ OPTIMAL        Lowest Latency • Highest Uptime
+io.net                 $0.1787      $0.1722     1.63s     10     49.8%    86.4%  Dominated        --
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ★ OPTIMAL marks non-dominated providers: no other provider is at least as good on every objective and better on one.
 ```
@@ -165,7 +167,7 @@ GLM-5.3 (max)                z-ai/glm-5.3                                 59.5  
 ### `model_router.py` — model and provider for a required score
 
 Picks a benchmarked model whose Artificial Analysis score meets a threshold, then that
-model's best provider from the ProviderUtility scorer. Two modes choose the model:
+model's best provider from the ProviderScore scorer. Two modes choose the model:
 
 - `cheapest` – the cheapest model at or above the score.
 - `efficient` – the efficient point of the cost/quality frontier built from the models at or
@@ -200,7 +202,7 @@ r.model_id, r.provider.provider_slug, r.provider.total_cost_per_m
 
 ```bash
 openrouter-frontier stats   z-ai/glm-5.3-flash --sort cache --top 5   # 24h metrics table
-openrouter-frontier score   z-ai/glm-5.3-flash --time-value 30        # ProviderUtility ranking
+openrouter-frontier score   z-ai/glm-5.3-flash --time-value 30        # ProviderScore ranking
 openrouter-frontier cache   z-ai/glm-5.3-flash novita                 # one provider's cache economics
 openrouter-frontier compare z-ai/glm-5.3-flash z-ai novita deepinfra  # side by side
 openrouter-frontier search  glm

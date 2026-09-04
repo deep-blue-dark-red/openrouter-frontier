@@ -240,7 +240,7 @@ class OpenRouterAnalytics:
         return self.get_model_stats(model).get_provider(provider)
 
     def score_model_providers(self, model: str, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
-        """Rank every provider of ``model`` by ProviderUtility total cost, cheapest first."""
+        """Rank every provider of ``model`` by ProviderScore total cost, cheapest first."""
         cfg = config or ScoringConfig()
         return self.get_model_stats(model, apply_discount=cfg.apply_discount).score_providers(cfg)
 
@@ -329,5 +329,5 @@ def get_cache_hit_rate(model: str, provider: str) -> Optional[float]:
 
 
 def score_model_providers(model: str, config: Optional[ScoringConfig] = None) -> List[ScoreBreakdown]:
-    """Rank providers of a model by ProviderUtility total cost using a shared default client."""
+    """Rank providers of a model by ProviderScore total cost using a shared default client."""
     return _default_client.score_model_providers(model, config=config)

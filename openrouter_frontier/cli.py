@@ -174,7 +174,7 @@ def score_command(
     top: Optional[int],
     json_output: bool,
 ):
-    """Rank providers by ProviderUtility expected cost per turn (token + time + failure risk)."""
+    """Rank providers by ProviderScore expected cost per turn (token + time + failure risk)."""
     cfg = ScoringConfig(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -212,7 +212,7 @@ def score_command(
             f"Mode: [bold yellow]{mode}[/bold yellow] | Time Value: [bold]${time_value:.2f}/hr[/bold] | Failure Risk: [bold]{'Yes' if price_failures else 'No'}[/bold]\n"
             f"Shrinkage: prior=[bold]{prior * 100:.0f}%[/bold], weight=[bold]{prior_weight / 1e9:.1f}B[/bold] tokens | "
             f"Discounts: [bold]{'Applied' if discount else 'List Price'}[/bold] | Quants: [bold]{'All' if all_quants else 'Primary'}[/bold]",
-            title="ProviderUtility Evaluation & Cost per 1M tok",
+            title="ProviderScore Evaluation & Cost per 1M tok",
             border_style="magenta",
         )
     )

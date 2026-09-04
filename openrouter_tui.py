@@ -6,7 +6,7 @@ Views:
                   first, cheapest to most expensive, with the efficient point highlighted; then dominated
                   models by distance to the frontier). Type to fuzzy-filter; Tab toggles the
                   benchmark metric between intelligence and coding.
-  2. Providers  - Enter on a model lists its endpoints ranked by ProviderUtility scored cost.
+  2. Providers  - Enter on a model lists its endpoints ranked by ProviderScore scored cost.
                   Tab or 'a' toggles between the primary quantization and all variants.
   3. Detail     - Enter on a provider shows the full cost breakdown and pricing.
 

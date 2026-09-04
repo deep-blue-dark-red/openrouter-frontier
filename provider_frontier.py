@@ -4,7 +4,7 @@
 Instead of collapsing latency, throughput, and reliability into a single dollar figure via a
 time-value guess, this reports which providers are non-dominated across five objectives:
 
-    minimise  scored cost per turn      (ProviderUtility, pure token cost + failure risk)
+    minimise  scored cost per turn      (ProviderScore, pure token cost + failure risk)
     minimise  p50 time to first token
     maximise  p50 throughput (tokens/s)
     maximise  shrunk cache hit rate
@@ -48,8 +48,10 @@ def _near(a: Optional[float], b: float, tol: float) -> bool:
 class ProviderCandidate:
     provider_name: str
     provider_slug: str
-    scored_cost_usd: float
-    token_cost_usd: float
+    scored_cost_usd: float       # per turn
+    token_cost_usd: float        # per turn
+    scored_cost_per_m: float     # same cost normalised to $ per 1M tokens (display)
+    token_cost_per_m: float
     h_used: float
     h_raw: float
     hit_price: float
@@ -117,8 +119,8 @@ def print_provider_table(candidates: List[ProviderCandidate], model_name: str, c
     rows = [
         [
             c.provider_name,
-            f"${c.scored_cost_usd:.6f}",
-            f"${c.token_cost_usd:.6f}",
+            f"${c.scored_cost_per_m:.4f}",
+            f"${c.token_cost_per_m:.4f}",
             fmt_seconds(c.ttft_seconds),
             fmt_tps(c.throughput_tps),
             f"{c.h_used * 100.0:.1f}%",
@@ -304,6 +306,8 @@ def main() -> None:
             provider_slug=s.provider_slug,
             scored_cost_usd=s.total_cost_usd,
             token_cost_usd=s.token_cost_usd,
+            scored_cost_per_m=s.total_cost_per_m,
+            token_cost_per_m=s.token_cost_per_m,
             h_used=s.h_used,
             h_raw=s.h_raw,
             hit_price=s.hit_price,

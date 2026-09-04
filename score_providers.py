@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""score_providers.py - rank a model's providers by ProviderUtility expected cost per turn.
+"""score_providers.py - rank a model's providers by ProviderScore expected cost per turn.
 
 Usage:
   ./score_providers.py [MODEL] [-c PROMPT_TOKENS] [-o COMPLETION_TOKENS] [-t USD_PER_HOUR] [-n TOP]
@@ -111,7 +111,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
     print_table(
         cols,
         rows,
-        title=f"ProviderUtility Evaluation: {model_name}",
+        title=f"ProviderScore Evaluation: {model_name}",
         subtitle_lines=[
             f"Mode: {mode}  •  Turn: {cfg.prompt_tokens} prompt + {cfg.completion_tokens} completion tokens"
             f"  •  Time Value: ${cfg.time_value_usd_per_hour:.2f}/hr",
@@ -125,7 +125,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Rank OpenRouter providers for a model by ProviderUtility expected cost per turn.",
+        description="Rank OpenRouter providers for a model by ProviderScore expected cost per turn.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("model", nargs="?", default="z-ai/glm-5.3-flash", help="Model slug or shorthand")

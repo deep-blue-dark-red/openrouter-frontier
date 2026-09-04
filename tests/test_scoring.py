@@ -52,13 +52,38 @@ def test_time_and_failure_costs():
     assert math.isclose(sb.total_cost_usd, sb.token_cost_usd + 4.0 + 0.3)
 
 
-def test_from_api_dict_scales_per_token_prices_and_applies_discount():
-    p = EndpointPricing.from_api_dict(
-        {"prompt": "0.000001", "completion": "0.000002", "input_cache_read": "0.0000001", "discount": 0.5}
-    )
-    assert math.isclose(p.prompt, 0.5)
-    assert math.isclose(p.completion, 1.0)
-    assert math.isclose(p.input_cache_read, 0.05)
+def test_from_api_dict_treats_api_prices_as_already_discounted():
+    # Real payload shape: Z.ai GLM-5.3-Flash at 50% off. The API quotes the *net* price
+    # (0.000000075/token = $0.075/M); list price is $0.15/M. The discount must not be
+    # applied a second time.
+    raw = {"prompt": "0.000000075", "completion": "0.00000025", "input_cache_read": "0.000000015", "discount": 0.5}
+    p = EndpointPricing.from_api_dict(raw)
+    assert math.isclose(p.prompt, 0.075)
+    assert math.isclose(p.completion, 0.25)
+    assert math.isclose(p.input_cache_read, 0.015)
     assert p.input_cache_write is None
-    undiscounted = EndpointPricing.from_api_dict({"prompt": "0.000001", "completion": "0.000002", "discount": 0.5}, apply_discount=False)
-    assert math.isclose(undiscounted.prompt, 1.0)
+    assert p.discount == 0.5
+
+    listed = EndpointPricing.from_api_dict(raw, apply_discount=False)
+    assert math.isclose(listed.prompt, 0.15)
+    assert math.isclose(listed.completion, 0.50)
+    assert math.isclose(listed.input_cache_read, 0.03)
+
+
+def test_from_api_dict_no_discount_is_identity():
+    raw = {"prompt": "0.00000015", "completion": "0.0000005", "input_cache_read": "0.00000003", "discount": 0}
+    a = EndpointPricing.from_api_dict(raw)
+    b = EndpointPricing.from_api_dict(raw, apply_discount=False)
+    assert (a.prompt, a.completion, a.input_cache_read) == (b.prompt, b.completion, b.input_cache_read)
+    assert math.isclose(a.prompt, 0.15)
+
+
+def test_price_per_million_is_strict_per_token_conversion():
+    from openrouter_frontier._util import price_per_million
+
+    assert math.isclose(price_per_million("0.000000075"), 0.075)
+    # A legitimately tiny per-token price must scale too, not be mistaken for per-million.
+    assert math.isclose(price_per_million("0.000000000005"), 0.000005)
+    assert price_per_million(None) is None
+    assert price_per_million("") is None
+    assert price_per_million("abc") is None

@@ -52,20 +52,19 @@ def save_json_cache(path: Path, data: Any) -> None:
 
 
 def price_per_million(val: Any) -> Optional[float]:
-    """Normalise an OpenRouter price to USD per million tokens.
+    """Convert a per-token price string from the public OpenRouter APIs to USD per million.
 
-    The public APIs quote prices per token (e.g. ``"0.000000075"``), while the frontend
-    effective-pricing endpoint already quotes per million. Anything below $0.01 is
-    treated as per-token and scaled up; no real per-million price is that small.
+    ``/api/v1/models`` and ``/api/v1/models/{slug}/endpoints`` quote every price per token
+    (e.g. ``"0.000000075"`` for $0.075/M). The frontend effective-pricing endpoint quotes
+    per million already and must not be passed through this helper.
     Returns ``None`` for missing or unparsable values.
     """
     if val is None or val == "":
         return None
     try:
-        f = float(val)
+        return float(val) * 1_000_000.0
     except (ValueError, TypeError):
         return None
-    return f * 1_000_000.0 if f < 0.01 else f
 
 
 T = TypeVar("T")

@@ -1,4 +1,4 @@
-"""ProviderUtility scoring model: expected cost per conversation turn for one endpoint.
+"""ProviderScore scoring model: expected cost per conversation turn for one endpoint.
 
     tokenCost   = [ C·(h_used·hitPrice + (1 − h_used)·missPrice) + O·out ] / 1e6 + requestFee
     timeCost    = (timeValue$/hr / 3600) · (ttft + O / throughput)
@@ -17,7 +17,7 @@ from ._util import price_per_million
 
 @dataclass
 class ScoringConfig:
-    """Knobs for the ProviderUtility model.
+    """Knobs for the ProviderScore model.
 
     :param prompt_tokens: Prompt/context tokens per turn (C).
     :param completion_tokens: Completion tokens per turn (O).
@@ -51,11 +51,16 @@ class EndpointPricing:
     input_cache_read: Optional[float] = None   # absent => endpoint has no prompt cache
     input_cache_write: Optional[float] = None  # absent => cache writes billed as normal input
     request_fee: float = 0.0                   # fixed USD per request
-    discount: float = 0.0                      # fraction, e.g. 0.5 for 50% off
+    discount: float = 0.0                      # fraction, e.g. 0.5 for 50% off (informational)
 
     @classmethod
     def from_api_dict(cls, p: Dict[str, Any], apply_discount: bool = True) -> "EndpointPricing":
-        """Parse a ``pricing`` object from the OpenRouter endpoints API."""
+        """Parse a ``pricing`` object from the OpenRouter endpoints API.
+
+        The API quotes prices per token and **already net of any discount**; ``discount`` is
+        informational. With ``apply_discount=True`` the prices are used as-is. With
+        ``apply_discount=False`` they are divided by ``1 - discount`` to recover the list price.
+        """
         prompt = price_per_million(p.get("prompt")) or 0.0
         completion = price_per_million(p.get("completion")) or 0.0
         read = price_per_million(p.get("input_cache_read"))
@@ -63,8 +68,8 @@ class EndpointPricing:
         request_fee = float(p.get("request") or 0.0)
         discount = float(p.get("discount") or 0.0)
 
-        if apply_discount and discount > 0:
-            mult = max(0.0, 1.0 - discount)
+        if not apply_discount and 0 < discount < 1:
+            mult = 1.0 / (1.0 - discount)
             prompt *= mult
             completion *= mult
             read = read * mult if read is not None else None
@@ -201,7 +206,7 @@ def evaluate_endpoint(
     endpoint_id: str = "",
     quantization: str = "unknown",
 ) -> ScoreBreakdown:
-    """Score one endpoint with the ProviderUtility model (see module docstring).
+    """Score one endpoint with the ProviderScore model (see module docstring).
 
     :param cache_hit_rate: Published 24h hit rate in 0..1. ``None`` falls back to the prior.
     :param total_tokens: 24h tokens served by this endpoint; drives shrinkage weight.

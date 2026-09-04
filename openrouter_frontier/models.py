@@ -90,7 +90,7 @@ class ProviderStats:
         return _fmt_pct(self.uptime_1d_pct)
 
     def evaluate_score(self, config: Optional[ScoringConfig] = None) -> Optional[ScoreBreakdown]:
-        """Score this endpoint with the ProviderUtility model. ``None`` if pricing is unknown."""
+        """Score this endpoint with the ProviderScore model. ``None`` if pricing is unknown."""
         if not self.pricing:
             return None
         ttft = self.latency_p50_ms / 1000.0 if self.latency_p50_ms is not None else None
