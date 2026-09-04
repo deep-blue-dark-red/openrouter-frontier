@@ -335,7 +335,8 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
     write(f"  Expected Task Cost:         \x1b[1;32m{s.formatted_task_cost}{RESET}   (per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
     write(f"    fixed (new tok + output):  {_usd(s.fixed_cost_usd)}")
-    write(f"    time:                      {_usd(s.time_cost_usd)}  (prefill {_usd(s.prefill_cost_usd)}, gen {_usd(s.decode_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})")
+    write(f"    time:                      {_usd(s.time_cost_usd)}  (gen {_usd(s.decode_cost_usd)}, prefill new tokens {_usd(s.prefill_new_cost_usd)}, "
+          f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})")
     write(f"    cached-read baseline:      {_usd(s.read_baseline_usd)}")
     write(f"    cache-miss premium:        {_usd(s.miss_premium_usd)}")
     write(f"    failure premium + return:  {_usd(s.failure_premium_usd + s.return_penalty_usd)}")

@@ -114,6 +114,7 @@ def test_cache_miss_costs_prefill_time():
     sb = evaluate_endpoint(pr, inp, cfg)
     # new tokens 5000 each turn (1 s) + prefixes 0, 5000, 10000 tokens (0 + 1 + 2 s) => 6 s
     assert math.isclose(sb.time_cost_usd, 6.0) and math.isclose(sb.prefill_cost_usd, 6.0)
+    assert math.isclose(sb.prefill_new_cost_usd, 3.0) and math.isclose(sb.prefill_miss_cost_usd, 3.0)
     warm = evaluate_endpoint(pr, EndpointInputs(cache_hit_rate=1.0, uptime_pct=100, ttft_p50=0.0, tps_p50=50.0), cfg)
     assert math.isclose(warm.time_cost_usd, 3.0)  # only the new tokens
     assert sb.prefill_tps == 5000.0

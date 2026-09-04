@@ -326,7 +326,7 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
             f"({score.turns} turns × {score.new_tokens}+{score.completion_tokens} tok, {score.routing} routing)"
         )
         console.print(
-            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (prefill {score.formatted_prefill_cost}, gen {score.formatted_decode_cost}, overhead {score.formatted_ttft_cost}) | failures {score.formatted_failure_cost} | "
+            f"  tokens {score.formatted_token_cost} | time {score.formatted_time_cost} (gen {score.formatted_decode_cost}, prefill new tokens {_usd(score.prefill_new_cost_usd)}, re-prefill on cache miss {_usd(score.prefill_miss_cost_usd)}, overhead {score.formatted_ttft_cost}) | failures {score.formatted_failure_cost} | "
             f"miss premium {score.formatted_miss_premium} | perfect cache {_usd(score.perfect_cache_cost_usd)} | cold {_usd(score.cold_cache_cost_usd)}"
         )
         console.print(f"[bold cyan]Prices /M:[/bold cyan] input ${score.input_price:.4f} | read ${score.read_price:.4f} | write ${score.write_price:.4f} | miss ${score.miss_price:.4f}")

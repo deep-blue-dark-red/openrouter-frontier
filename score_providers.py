@@ -108,7 +108,7 @@ def print_scores(results: List[ScoreBreakdown], model_name: str, cfg: ScoringCon
         rows.append(row)
 
     footer = ("Task $ = expected cost of the whole task on that endpoint (tokens + time + failures); lower is better. "
-              "Prefill $ = prompt processing at 100x decode: the new tokens every turn plus the whole prefix after a cache miss; Gen $ = decoding output. "
+              "Prefill $ = prompt processing at 100x decode: the new tokens every turn plus the whole prefix again after a cache miss (most of it); Gen $ = decoding output. "
               "Published TTFT is shown but not charged (it is the prefill of other traffic). "
               "Miss $ = cache-miss premium. $/M = task cost per 1M submitted tokens (secondary). "
               "CacheHit = published 24h rate. E[TTFT] = lognormal mean of p50/p90.")
