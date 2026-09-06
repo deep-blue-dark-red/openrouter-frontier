@@ -191,6 +191,12 @@ class EndpointPricing:
         request_fee = float(p.get("request") or 0.0)
         discount = float(p.get("discount") or 0.0)
 
+        # Some upstream entries publish write < read (e.g. gemini-3.8-flash @ AI Studio).
+        # A cache write can never be cheaper than a read; clamping keeps miss/failure
+        # premiums non-negative instead of rewarding misses.
+        if read is not None and write is not None and write < read:
+            write = read
+
         if not apply_discount and 0 < discount < 1:
             mult = 1.0 / (1.0 - discount)
             prompt *= mult

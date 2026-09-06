@@ -3,7 +3,7 @@
 
 Views:
   1. Models     - the catalog ranked by the cost vs. quality Pareto frontier (frontier models
-                  first, cheapest to most expensive, with the efficient point highlighted; then dominated
+                  first, cheapest to most expensive, with the knee point highlighted; then dominated
                   models by distance to the frontier). Type to fuzzy-filter; Tab toggles the
                   benchmark metric between intelligence and coding.
   2. Providers  - Enter on a model lists its endpoints ranked by ProviderScore scored cost.
@@ -241,7 +241,8 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
     name_w = max([MODEL_NAME_MIN_W] + [len(m["name"]) for m in models])
     cols = [MODEL_STATUS_COL, Column("Model Name", name_w), MODEL_ID_COL,
             Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
-            Column("Prompt $/M", 12, ">"), Column("Output $/M", 11, ">")]
+            Column("Input $/M", 12, ">"), Column("Output $/M", 11, ">"),
+            Column("Cache $/M", 11, ">"), Column("Blend $/M", 11, ">")]
     head = header_line(cols)
     write(f"{BOLD}{head[:width - 1]}{RESET}")
     write("─" * min(width - 1, len(head)))
@@ -253,9 +254,11 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
         for i in range(scroll, end):
             m = filtered[i]
             efficient, front = m["is_efficient"], m["on_frontier"]
-            status = "★ EFFICIENT" if efficient else "★ OPTIMAL" if front else f"-{m['dist']:.1f} pts"
+            status = "★ OPTIMAL KNEE" if efficient else "★ OPTIMAL" if front else f"-{m['dist']:.1f} pts"
             line = format_row(
-                [status, m["name"][:name_w], m["id"][:30], f"{m['score']:.1f}", _usd(m["cost"]), _usd(m["compl_p"] or 0.0)],
+                [status, m["name"][:name_w], m["id"][:30], f"{m['score']:.1f}", _usd(m["cost"]), _usd(m["compl_p"] or 0.0),
+                 _usd(m["cache_p"]) if m["cache_p"] is not None else "-",
+                 _usd(m["blend_p"]) if m["blend_p"] is not None else "-"],
                 cols,
             )[: width - 1]
             if i == idx:
@@ -272,9 +275,9 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
     write()
     write(help_line([("Enter", "providers"), ("Tab", "toggle metric"), ("↑/↓", "move"), ("Esc", "clear / exit")], width - 1))
     sys.stdout.write(styled([
-        (BOLD_YELLOW, "★ EFFICIENT"), ("", " best quality gain per dollar   "),
+        (BOLD_YELLOW, "★ OPTIMAL KNEE"), ("", " best quality gain per dollar   "),
         (GREEN, "★ OPTIMAL"), ("", " on the cost/quality frontier   "),
-        ("", "-N pts gap to frontier"),
+        ("", "-N pts is distance from frontier, score units"),
     ], width - 1))
     sys.stdout.flush()
     return filtered, idx, scroll
@@ -330,23 +333,71 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
 def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     clear_screen()
     rule = "─" * min(width - 1, 78)
+
+    # Split the task cost into the model's variables and normalise each to
+    # USD per 1M submitted-or-generated tokens (the denominator used for
+    # task_cost_per_m), so the breakdown is comparable across providers.
+    submitted = s.submitted_tokens or 1
+    per_m = lambda usd: f"${usd / submitted * 1e6:.4f}"
+
+    fixed_m = per_m(s.fixed_cost_usd)        # write new tokens + generate output (+ request fee)
+    read_m = per_m(s.read_baseline_usd)      # cache-read baseline (prefix @ cache-read price)
+    miss_m = per_m(s.miss_premium_usd)       # cache-miss premium (missed prefix @ cache-write price)
+    time_m = per_m(s.time_cost_usd)          # decode + prefill + overhead
+    fail_m = per_m(s.failure_cost_usd)       # failure premium + return penalty
+
+    # weighted /M: idealized blended price = pure token billing assuming perfect cache
+    # (no misses, no time charge, no failures). It is the sum of the token-only terms.
+    weighted_m = per_m(s.fixed_cost_usd + s.read_baseline_usd)
+    # adj weighted/M: the realised task cost per 1M tokens (== task_cost_per_m).
+    adj_m = per_m(s.task_cost_usd)
+
+    # Aligned label/value rows; every value shares the same starting column.
+    rows = []
+    def row(label, value, note="", indent=2):
+        rows.append((indent, label, value, note))
+
+    row("Expected Task Cost:", f"\x1b[1;32m{s.formatted_task_cost}{RESET}",
+        f"(per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
+    row("Expected Task Time:", s.formatted_task_time,
+        f"(per turn {s.formatted_turn_time}; published TTFT {fmt_seconds(s.ttft_seconds)} shown, not charged)")
+    row("weighted/M (idealized):", weighted_m,
+        "(= fixed/M + cache-read/M; no misses, no time, no failures)")
+    row("adj weighted/M:", adj_m, f"(task {s.formatted_task_cost} / {submitted / 1e6:.2f}M submitted tok)")
+    row("fixed/M:", fixed_m, "(write new tokens + generate output)", indent=4)
+    row("cache-read/M:", read_m, "(prefix @ cache-read price)", indent=4)
+    row("cache-miss/M:", miss_m, f"(real {s.formatted_cache_hit_rate} hit rate; missed prefix @ cache-write)", indent=4)
+    row("time/M:", time_m, "(decode + prefill + overhead)", indent=4)
+    row("failure/M:", fail_m, f"(uptime {fmt_pct(s.uptime_pct)})", indent=4)
+    row("fixed (new tok + output):", _usd(s.fixed_cost_usd), indent=4)
+    row("time:", _usd(s.time_cost_usd),
+        f"(gen {_usd(s.decode_cost_usd)}, prefill new tokens {_usd(s.prefill_new_cost_usd)}, "
+        f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})",
+        indent=4)
+    row("cached-read baseline:", _usd(s.read_baseline_usd), indent=4)
+    row("cache-miss premium:", _usd(s.miss_premium_usd), indent=4)
+    row("failure premium + return:", _usd(s.failure_cost_usd), indent=4)
+    row("Cache Hit Rate (24h):", f"{BOLD}{s.formatted_cache_hit_rate}{RESET}"
+        + (f"   imputed: {', '.join(s.imputed)}" if s.imputed else ""))
+    row("Quantization Variant:", s.quantization.upper())
+
+    # value column = one past the longest (indent + label) prefix, so every value lines up
+    value_col = max(len(" " * indent + label) for indent, label, _, _ in rows) + 2
+
     write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})")
     write(rule)
     write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
-    write(f"  Expected Task Cost:         \x1b[1;32m{s.formatted_task_cost}{RESET}   (per turn {_usd(s.mean_turn_cost_usd)}, per 1M submitted tok ${s.task_cost_per_m:.4f})")
-    write(f"  Expected Task Time:         {s.formatted_task_time}   (per turn {s.formatted_turn_time}; published TTFT {fmt_seconds(s.ttft_seconds)} shown, not charged)")
-    write(f"    fixed (new tok + output):  {_usd(s.fixed_cost_usd)}")
-    write(f"    time:                      {_usd(s.time_cost_usd)}  (gen {_usd(s.decode_cost_usd)}, prefill new tokens {_usd(s.prefill_new_cost_usd)}, "
-          f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})")
-    write(f"    cached-read baseline:      {_usd(s.read_baseline_usd)}")
-    write(f"    cache-miss premium:        {_usd(s.miss_premium_usd)}")
-    write(f"    failure premium + return:  {_usd(s.failure_premium_usd + s.return_penalty_usd)}")
+    write(f"  per 1M token:  input/M: ${s.input_price:.4f}  |  output/M: ${s.out_price:.4f}  |  "
+          f"cache/M: ${s.read_price:.4f}  |  weighted/M: {weighted_m}")
+    for indent, label, value, note in rows:
+        prefix = " " * indent + label
+        line = prefix + " " * (value_col - len(prefix)) + value
+        if note:
+            line += f"  {note}"
+        write(line)
     write(f"  Bounds: perfect cache {_usd(s.perfect_cache_cost_usd)}  |  cold cache {_usd(s.cold_cache_cost_usd)}")
     write(f"  Risk: σ_proc {_usd(s.sigma_proc_usd)}  |  σ_par {_usd(s.sigma_par_usd)}  |  P(migrate to fallback) {s.migration_probability:.0%}")
-    write(f"  Cache Hit Rate (24h):       {BOLD}{s.formatted_cache_hit_rate}{RESET}" + (f"   imputed: {', '.join(s.imputed)}" if s.imputed else ""))
-    write(f"  Prices per 1M tok:          input ${s.input_price:.4f}  |  read ${s.read_price:.4f}  |  write ${s.write_price:.4f}  |  miss ${s.miss_price:.4f}  |  out ${s.out_price:.4f}")
     write(f"  E[TTFT]: {fmt_seconds(s.ttft_seconds)}  |  Throughput p50: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
-    write(f"  Quantization Variant:       {s.quantization.upper()}")
     write(rule)
     write(help_line([("Any key", "back to providers")], width - 1))
     sys.stdout.flush()
@@ -404,7 +455,18 @@ def run_tui() -> None:
                     clear_screen()
                     write(f"Fetching provider analytics for {selected['id']}...")
                     sys.stdout.flush()
-                    scores = score_model_providers(selected["permaslug"], config=ScoringConfig())
+                    try:
+                        scores = score_model_providers(selected["permaslug"], config=ScoringConfig())
+                    except Exception as e:
+                        clear_screen()
+                        write(f"{BOLD}Failed to fetch provider analytics for {selected['id']}{RESET}")
+                        write(f"{DIM}{e}{RESET}")
+                        write()
+                        write(help_line([("Any key", "back to models")], width - 1))
+                        sys.stdout.flush()
+                        get_key()
+                        view, scores = "MODELS", []
+                        continue
                 active, p_idx, p_scroll = draw_providers(selected, scores, all_quants, p_idx, p_scroll, width, viewport)
                 key = get_key()
                 new_idx, clicked = navigate(key, p_idx, len(active), p_scroll, min(len(active), viewport))

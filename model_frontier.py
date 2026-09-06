@@ -79,6 +79,7 @@ def load_data(force_refresh: bool = False) -> Tuple[Dict[str, Dict[str, Any]], D
         pricing = m.get("pricing") or {}
         prompt_tok = float(pricing.get("prompt") or 0.0)
         compl_tok = float(pricing.get("completion") or 0.0)
+        cache_tok = pricing.get("input_cache_read")
         catalog[m.get("id", "")] = {
             "name": m.get("name", m.get("id")),
             "canonical_slug": m.get("canonical_slug", m.get("id")),
@@ -86,6 +87,7 @@ def load_data(force_refresh: bool = False) -> Tuple[Dict[str, Dict[str, Any]], D
             "completion_per_m": compl_tok * 1_000_000,
             "prompt_per_token": prompt_tok,
             "completion_per_token": compl_tok,
+            "cache_read_per_m": float(cache_tok) * 1_000_000 if cache_tok is not None else None,
         }
     return catalog, raw_bench or {}
 
@@ -102,6 +104,26 @@ def extract_benchmark_items(raw_bench: Dict[str, Any], metric: str) -> Tuple[Lis
         for e in raw_bench.get("aaData", {}).get(metric, [])
     ]
     return items, raw_bench.get("weightedInputPrices", {})
+
+
+# Blend weights: session token mix (80% in / 20% out) and cache-hit share of input.
+BLEND_F_IN = 0.8
+BLEND_F_OUT = 0.2
+BLEND_HIT_RATE = 0.95
+
+
+def blended_price(prompt_p: Optional[float], cache_p: Optional[float], compl_p: Optional[float]) -> Optional[float]:
+    """P_blend = f_in * ((1-h) * P_in + h * P_cache) + f_out * P_out.
+
+    Missing cache price means no cache discount (P_cache = P_in); missing
+    output price falls back to the input price.
+    """
+    if prompt_p is None:
+        return None
+    p_in = float(prompt_p)
+    p_cache = float(cache_p) if cache_p is not None else p_in
+    p_out = float(compl_p) if compl_p is not None else p_in
+    return BLEND_F_IN * ((1.0 - BLEND_HIT_RATE) * p_in + BLEND_HIT_RATE * p_cache) + BLEND_F_OUT * p_out
 
 
 def build_candidates(
@@ -153,6 +175,12 @@ def build_candidates(
             "cost_unit": unit,
             "prompt_p": cat["prompt_per_m"] if cat else None,
             "compl_p": cat["completion_per_m"] if cat else None,
+            "cache_p": cat["cache_read_per_m"] if cat else None,
+            "blend_p": blended_price(
+                cat["prompt_per_m"] if cat else None,
+                cat["cache_read_per_m"] if cat else None,
+                cat["completion_per_m"] if cat else None,
+            ),
             "metric": metric,
         })
         seen.add(base_id)

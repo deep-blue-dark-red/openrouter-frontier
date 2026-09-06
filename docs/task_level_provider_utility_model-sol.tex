@@ -1,0 +1,482 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\Cov}{\operatorname{Cov}}
+\newcommand{\USD}{\text{USD}}
+
+\title{A Task-Level Provider Utility Model}
+\author{Matthew Pollard}
+\date{}
+
+\begin{document}
+\maketitle
+
+Provider selection should minimize the expected risk-adjusted cost of completing an
+entire task, not the nominal price of an isolated request. A task consists of $N$
+conversational turns whose reusable prefix generally grows over time. The model
+includes cached and uncached input charges, output-token charges, latency and
+token-generation time converted into dollars, endpoint failures and retries,
+stochastic cache misses, shrinkage of noisy endpoint statistics, and a variance
+penalty for operational and estimation risk.
+
+\section{Conversation structure}
+
+For turn $k=1,\ldots,N$, let
+\begin{itemize}[nosep]
+  \item $A_k$ be newly appended prompt tokens, such as a user message or tool result;
+  \item $O_k$ be completion tokens generated on the turn; and
+  \item $S_k$ be reusable prefix tokens preceding the new input.
+\end{itemize}
+
+For a conversation that resubmits its complete history,
+\begin{equation}
+S_k=\sum_{j<k}(A_j+O_j).
+\end{equation}
+The complete prompt length is therefore
+\begin{equation}
+P_k=S_k+A_k.
+\end{equation}
+This distinction matters: $A_k$ is necessarily new input, whereas only $S_k$
+is eligible for a cache hit.
+
+\section{Endpoint parameters}
+
+For endpoint $e$, let
+\begin{itemize}[nosep]
+  \item $w_e$ be the uncached-input or cache-write price per token;
+  \item $r_e$ be the cached-read price per token;
+  \item $c_e$ be the completion price per token;
+  \item $f_e$ be the fixed request charge;
+  \item $h_e$ be the probability that the reusable prefix is cached;
+  \item $p_e=1-h_e$ be the cache-miss probability;
+  \item $u_e$ be the probability that an individual attempt succeeds;
+  \item $L_e$ be time to first token in seconds;
+  \item $G_e$ be token-generation throughput in tokens per second;
+  \item $T_e^F$ be time consumed by a failed attempt;
+  \item $\beta_e\in[0,1]$ be the fraction of attempted monetary input cost charged
+        on failure; and
+  \item $v$ be the user's value of time in USD per hour.
+\end{itemize}
+
+Define the dollar value of one second as
+\begin{equation}
+\rho=\frac{v}{3600}.
+\end{equation}
+The successful-turn wall-clock time is
+\begin{equation}
+T_{e,k}^S=L_e+\frac{O_k}{G_e}.
+\end{equation}
+The first term values latency to first token; the second values token-generation
+time.
+
+\section{Cache-miss model}
+
+For every attempt $j$ at turn $k$, define
+\begin{equation}
+M_{k,j}\sim\operatorname{Bernoulli}(p_e),
+\end{equation}
+where $M_{k,j}=1$ denotes a complete miss of the reusable prefix. Cache events
+are assumed independent across attempts and turns and independent of endpoint
+availability.
+
+Let
+\begin{equation}
+\Delta_e=w_e-r_e
+\end{equation}
+be the cache-miss price spread. The attempted input cost is
+\begin{equation}
+I_{e,k,j}
+=f_e+w_eA_k+S_k\left[r_e+M_{k,j}\Delta_e\right].
+\end{equation}
+Thus new tokens $A_k$ are always charged at $w_e$. On a hit, the reusable
+prefix $S_k$ is charged at $r_e$; on a miss, the same prefix is charged at
+$w_e$.
+
+For a fixed hit probability,
+\begin{align}
+\bar I_{e,k}
+&=\E[I_{e,k,j}] \\
+&=f_e+w_eA_k+S_k\left[r_e+p_e\Delta_e\right],
+\end{align}
+and
+\begin{equation}
+V_{e,k}^I
+=\Var(I_{e,k,j})
+=S_k^2\Delta_e^2p_e(1-p_e).
+\end{equation}
+
+\section{Uptime and retry model}
+
+Let an attempt succeed independently with probability $u_e$. The number of
+failed attempts before the first success is
+\begin{equation}
+K_{e,k}\sim\operatorname{GeometricFailures}(u_e),
+\end{equation}
+with
+\begin{equation}
+\E[K_{e,k}]=\frac{1-u_e}{u_e},
+\qquad
+\Var(K_{e,k})=\frac{1-u_e}{u_e^2}.
+\end{equation}
+This models retrying the endpoint until one attempt succeeds. An implementation
+may replace this with an explicit fallback chain when the fallback endpoint is
+known.
+
+The cost of the successful attempt is
+\begin{equation}
+Y_{e,k}^S=I_{e,k}+c_eO_k+\rho T_{e,k}^S.
+\end{equation}
+The cost of a failed attempt is
+\begin{equation}
+Y_{e,k}^F=\beta_e I_{e,k}+\rho T_e^F.
+\end{equation}
+The parameter $\beta_e$ makes the billing assumption explicit. Setting
+$\beta_e=0$ means failed attempts incur time cost but no token charge, whereas
+$\beta_e=1$ conservatively assigns them their full attempted input charge.
+
+The completed-turn cost is
+\begin{equation}
+X_{e,k}=Y_{e,k}^S+\sum_{j=1}^{K_{e,k}}Y_{e,k,j}^F.
+\end{equation}
+Define
+\begin{equation}
+B_e=\frac{1-u_e}{u_e}.
+\end{equation}
+Then
+\begin{equation}
+\mu_{e,k}^S
+=\bar I_{e,k}+c_eO_k
++\rho\left(L_e+\frac{O_k}{G_e}\right),
+\end{equation}
+\begin{equation}
+\mu_{e,k}^F=\beta_e\bar I_{e,k}+\rho T_e^F,
+\end{equation}
+and the expected cost of completing turn $k$ is
+\begin{equation}
+\boxed{
+\E[X_{e,k}]=\mu_{e,k}^S+B_e\mu_{e,k}^F
+}.
+\end{equation}
+Equivalently,
+\begin{equation}
+\boxed{
+\begin{aligned}
+\E[X_{e,k}]
+={}&\bar I_{e,k}+c_eO_k
++\rho\left(L_e+\frac{O_k}{G_e}\right) \\
+&+\frac{1-u_e}{u_e}
+\left(\beta_e\bar I_{e,k}+\rho T_e^F\right).
+\end{aligned}
+}
+\end{equation}
+Unlike a simple $(1-u_e)$ surcharge, the factor $(1-u_e)/u_e$ accounts for
+the possibility of more than one failed attempt.
+
+\section{Task-level expected cost}
+
+The task cost is the sum of its completed-turn costs:
+\begin{equation}
+X_e^{\mathrm{task}}=\sum_{k=1}^{N}X_{e,k}.
+\end{equation}
+Therefore,
+\begin{equation}
+\boxed{
+\mu_e^{\mathrm{task}}
+=\E[X_e^{\mathrm{task}}]
+=\sum_{k=1}^{N}\left[\mu_{e,k}^S+B_e\mu_{e,k}^F\right]
+}.
+\end{equation}
+This expected dollar cost per completed task should be the primary ranking
+quantity.
+
+\section{Constant-growth conversation}
+
+For intuition, suppose every turn adds $a$ new prompt tokens and produces $o$
+completion tokens. Let
+\begin{equation}
+d=a+o,
+\qquad
+S_k=(k-1)d.
+\end{equation}
+Define
+\begin{equation}
+\pi_e
+=r_e+p_e(w_e-r_e)
+=h_er_e+(1-h_e)w_e,
+\end{equation}
+\begin{equation}
+b_e=f_e+w_ea,
+\end{equation}
+\begin{equation}
+y_e=c_eo+\rho\left(L_e+\frac{o}{G_e}\right),
+\end{equation}
+\begin{equation}
+z_e=\rho T_e^F,
+\end{equation}
+and
+\begin{equation}
+D_e=1+\beta_e\frac{1-u_e}{u_e}.
+\end{equation}
+Then the expected task cost has the closed form
+\begin{equation}
+\boxed{
+\mu_e^{\mathrm{task}}
+=N\left[D_eb_e+y_e+B_ez_e\right]
++D_e\pi_ed\frac{N(N-1)}{2}
+}.
+\end{equation}
+The first term is linear in the number of turns. The second is quadratic because
+the prefix grows while being submitted repeatedly.
+
+The expected cache-miss premium, excluding the ordinary cached-read charge, is
+\begin{equation}
+\boxed{
+D_ep_e(w_e-r_e)d\frac{N(N-1)}{2}
+}.
+\end{equation}
+Consequently, a 5\% cache-miss rate is not merely a 5\% task-level surcharge. It
+applies to a sequence of progressively larger prefixes.
+
+\section{Operational variance}
+
+Assume successful and failed attempt times have variances
+\begin{equation}
+\Var(T_{e,k}^S)=(\sigma_{e,k}^S)^2,
+\qquad
+\Var(T_e^F)=(\sigma_e^F)^2.
+\end{equation}
+Then
+\begin{equation}
+V_{e,k}^S=V_{e,k}^I+\rho^2(\sigma_{e,k}^S)^2,
+\end{equation}
+and
+\begin{equation}
+V_{e,k}^F=\beta_e^2V_{e,k}^I+\rho^2(\sigma_e^F)^2.
+\end{equation}
+Using the variance of a random sum,
+\begin{equation}
+\boxed{
+\Var(X_{e,k})
+=V_{e,k}^S+B_eV_{e,k}^F
++\frac{1-u_e}{u_e^2}\left(\mu_{e,k}^F\right)^2
+}.
+\end{equation}
+The three components are uncertainty in the successful attempt, uncertainty in
+the costs of failed attempts, and uncertainty in how many failures occur before
+success.
+
+Under independence across turns,
+\begin{equation}
+\boxed{
+V_{e,\mathrm{process}}^{\mathrm{task}}
+=\sum_{k=1}^{N}\Var(X_{e,k})
+}.
+\end{equation}
+For constant transcript growth,
+\begin{equation}
+\sum_{k=1}^{N}S_k^2
+=d^2\frac{N(N-1)(2N-1)}{6}.
+\end{equation}
+Accordingly, cache-miss variance grows as $O(N^3)$, and its standard deviation
+grows as $O(N^{3/2})$.
+
+\section{Shrinkage of cache hit rate and uptime}
+
+Raw 24-hour endpoint statistics can be unstable for low-volume endpoints. Both
+cache hit rate and uptime should therefore be shrunk toward population priors.
+
+For cache hits, let $\hat h_e$ be the published cache-hit rate, $n_e^h$ the
+effective cache sample size, $h_0$ the population prior mean, and $\kappa_h$
+the prior strength. Use the beta prior
+\begin{equation}
+h_e\sim\operatorname{Beta}
+\left(\kappa_hh_0,\,\kappa_h(1-h_0)\right).
+\end{equation}
+After observing effective evidence $n_e^h$, the posterior parameters are
+\begin{equation}
+\alpha_e^h=\kappa_hh_0+n_e^h\hat h_e,
+\end{equation}
+and
+\begin{equation}
+\beta_e^h=\kappa_h(1-h_0)+n_e^h(1-\hat h_e).
+\end{equation}
+The shrunk hit rate is
+\begin{equation}
+\boxed{
+\tilde h_e
+=\frac{\kappa_hh_0+n_e^h\hat h_e}{\kappa_h+n_e^h}
+}.
+\end{equation}
+Its posterior variance is
+\begin{equation}
+\boxed{
+s_{h,e}^2
+=\frac{\alpha_e^h\beta_e^h}
+{(\alpha_e^h+\beta_e^h)^2(\alpha_e^h+\beta_e^h+1)}
+}.
+\end{equation}
+
+The effective sample size should not simply equal raw token volume. Cache outcomes
+within one request or conversation are correlated. A practical approximation is
+\begin{equation}
+n_e^h=\frac{T_e}{B_h},
+\end{equation}
+where $T_e$ is relevant prompt-token volume and $B_h$ is a configurable
+correlation-block size.
+
+Uptime is treated analogously. Given published uptime $\hat u_e$, effective
+sample size $n_e^u$, prior mean $u_0$, and prior strength $\kappa_u$,
+\begin{equation}
+\boxed{
+\tilde u_e
+=\frac{\kappa_uu_0+n_e^u\hat u_e}{\kappa_u+n_e^u}
+}.
+\end{equation}
+Its posterior variance $s_{u,e}^2$ follows the same beta-posterior expression.
+Uptime evidence should be measured in requests or approximately independent time
+buckets, not tokens.
+
+The expected-cost and process-variance equations use the shrunk values
+\begin{equation}
+h_e=\tilde h_e,
+\qquad
+u_e=\tilde u_e.
+\end{equation}
+
+\section{Shrinkage of latency and generation speed}
+
+Latency and generation speed can also be unstable at low volume. Because both
+quantities are positive and usually right-skewed, shrink them in log space. For a
+positive performance parameter $\theta_e$, such as TTFT or seconds per generated
+token, let $\hat\theta_e$ be the endpoint estimate and $\theta_0$ the model-wide
+or provider-wide prior. Define
+\begin{equation}
+\log\tilde\theta_e
+=\omega_e\log\hat\theta_e
++(1-\omega_e)\log\theta_0,
+\end{equation}
+where
+\begin{equation}
+\omega_e=\frac{n_e^\theta}{n_e^\theta+\kappa_\theta}.
+\end{equation}
+For throughput, shrink seconds per token $1/G_e$, rather than throughput $G_e$,
+because time cost is linear in $1/G_e$.
+
+When only p50 values are available, the resulting time cost is a point estimate.
+When multiple quantiles or raw observations are available, they should also be
+used to estimate $\sigma^S$ and $\sigma^F$.
+
+\section{Parameter-estimation risk}
+
+Process variance assumes that the endpoint parameters are known. Shrinkage reduces
+estimation error but does not eliminate it. Let
+\begin{equation}
+\boldsymbol\theta_e=(h_e,u_e,L_e,G_e,T_e^F,\ldots)
+\end{equation}
+have posterior covariance matrix $\Sigma_{\theta,e}$. A first-order approximation
+to uncertainty in expected task cost is
+\begin{equation}
+\boxed{
+V_{e,\mathrm{parameter}}^{\mathrm{task}}
+\approx
+\nabla_{\!\theta}\mu_e^{\mathrm{task}\,\mathsf T}
+\Sigma_{\theta,e}
+\nabla_{\!\theta}\mu_e^{\mathrm{task}}
+}.
+\end{equation}
+For independent parameter estimates, this reduces to a sum of squared sensitivities
+multiplied by their variances.
+
+Useful sensitivities include
+\begin{equation}
+\frac{\partial\mu_e^{\mathrm{task}}}{\partial h_e}
+=-
+\left(1+\beta_e\frac{1-u_e}{u_e}\right)
+(w_e-r_e)\sum_{k=1}^{N}S_k,
+\end{equation}
+\begin{equation}
+\frac{\partial\mu_e^{\mathrm{task}}}{\partial u_e}
+=-\frac{1}{u_e^2}\sum_{k=1}^{N}\mu_{e,k}^F,
+\end{equation}
+\begin{equation}
+\frac{\partial\mu_e^{\mathrm{task}}}{\partial L_e}=\rho N,
+\end{equation}
+and, when throughput is treated as a common endpoint parameter,
+\begin{equation}
+\frac{\partial\mu_e^{\mathrm{task}}}{\partial G_e}
+=-\rho\frac{\sum_{k=1}^{N}O_k}{G_e^2}.
+\end{equation}
+
+For constant transcript growth,
+\begin{equation}
+\sum_{k=1}^{N}S_k=O(N^2).
+\end{equation}
+Therefore uncertainty in the endpoint's true cache-hit rate contributes
+\begin{equation}
+V_{h,e}^{\mathrm{parameter}}=O(N^4),
+\end{equation}
+even though independent realized cache misses contribute only $O(N^3)$ process
+variance. Equivalently, realized miss-risk standard deviation grows as
+$O(N^{3/2})$, while uncertainty about the true miss rate can produce an
+$O(N^2)$ standard-deviation penalty. This is why uncertain cache statistics
+become especially consequential for long agent trajectories.
+
+\section{Risk-adjusted provider score}
+
+The final provider score is
+\begin{equation}
+\boxed{
+J_e
+=\mu_e^{\mathrm{task}}
++\lambda_{\mathrm{process}}
+ \sqrt{V_{e,\mathrm{process}}^{\mathrm{task}}}
++\lambda_{\mathrm{parameter}}
+ \sqrt{V_{e,\mathrm{parameter}}^{\mathrm{task}}}
+}.
+\end{equation}
+Here $\lambda_{\mathrm{process}}$ penalizes unpredictable realized costs and
+delays, while $\lambda_{\mathrm{parameter}}$ penalizes poorly estimated endpoint
+statistics. Reasonable interpretations are
+\begin{itemize}[nosep]
+  \item $\lambda_{\mathrm{process}}=\lambda_{\mathrm{parameter}}=0$: risk-neutral
+        expected cost;
+  \item $\lambda=1$: a one-standard-deviation penalty; and
+  \item $\lambda\approx1.645$: approximate one-sided 95\% protection under a
+        normal approximation.
+\end{itemize}
+Separating the penalties is preferable because a high-volume endpoint can have
+meaningful operational variance but little estimation uncertainty, while a
+low-volume endpoint may look excellent solely because its statistics are poorly
+estimated.
+
+\section{Reported outputs}
+
+For each endpoint, the tool should report
+\begin{enumerate}[nosep]
+  \item expected dollar cost per completed task;
+  \item risk-adjusted dollar score $J_e$;
+  \item expected number of failed attempts;
+  \item expected uncached-input, cached-read, and output tokens;
+  \item dollar cost of TTFT and token generation;
+  \item cache-miss premium;
+  \item uptime-retry premium;
+  \item process standard deviation;
+  \item parameter-estimation standard deviation; and
+  \item raw and shrunk cache-hit and uptime estimates.
+\end{enumerate}
+
+The primary ranking should use dollars per completed task. A normalized
+per-million-token figure may be shown secondarily, but it must state whether the
+denominator counts unique task tokens or repeatedly submitted prompt tokens.
+
+\end{document}

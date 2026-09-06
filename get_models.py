@@ -184,9 +184,11 @@ def main() -> None:
         p = m.get("pricing", {})
         name = (m.get("name") or m.get("id", "")).lower()
         if args.sort == "price":
-            return price_per_million(p.get("prompt")) or 0.0
+            v = price_per_million(p.get("prompt"))
+            return (0, v) if v is not None else (1, 0.0)
         if args.sort == "completion":
-            return price_per_million(p.get("completion")) or 0.0
+            v = price_per_million(p.get("completion"))
+            return (0, v) if v is not None else (1, 0.0)
         if args.sort == "context":
             return -int(m.get("context_length") or 0)
         if args.sort == "created":
