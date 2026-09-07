@@ -285,11 +285,11 @@ def main() -> None:
     cfg = config_from_args(args)
 
     if args.models or (args.model and args.model.lower() in ("models", "all", "catalog")):
-        candidates = compute_model_pareto(build_model_candidates(cfg))
-        total = len(candidates)
-        candidates.sort(key=lambda c: (not c.is_pareto, c.turn_cost_usd))
-        n_optimal = sum(c.is_pareto for c in candidates)
-        shown = candidates[:n_optimal] if args.optimal_only else candidates[: n_optimal + max(0, args.top)]
+        model_candidates = compute_model_pareto(build_model_candidates(cfg))
+        total = len(model_candidates)
+        model_candidates.sort(key=lambda c: (not c.is_pareto, c.turn_cost_usd))
+        n_optimal = sum(c.is_pareto for c in model_candidates)
+        shown = model_candidates[:n_optimal] if args.optimal_only else model_candidates[: n_optimal + max(0, args.top)]
         if args.json:
             print(json.dumps([asdict(c) for c in shown], indent=2))
         else:

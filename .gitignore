@@ -10,3 +10,5 @@ build/
 .pytest_cache/
 .memdb/
 .memtrace/
+.coverage
+uv.lock

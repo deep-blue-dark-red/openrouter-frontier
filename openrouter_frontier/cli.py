@@ -1,7 +1,7 @@
 """Rich-formatted ``openrouter-frontier`` command-line interface."""
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 import click
 from rich.console import Console
@@ -12,6 +12,7 @@ from rich.text import Text
 from . import __version__
 from ._util import filter_primary_quantization
 from .client import get_model_stats, score_model_providers
+from .models import ProviderStats
 from .render import fmt_pct, fmt_seconds, fmt_tps
 from .resolver import search_models
 from .profile_args import describe_profile
@@ -48,7 +49,7 @@ def _color_uptime(upt_pct: Optional[float], text: str) -> Text:
     return _graded(upt_pct, text, (99.0, 95.0, 85.0))
 
 
-def _fail(msg: str) -> None:
+def _fail(msg: str) -> NoReturn:
     console.print(f"[bold red]Error:[/bold red] {msg}")
     raise click.Abort()
 
@@ -76,6 +77,7 @@ def stats_command(model: str, provider: Optional[str], sort: str, top: Optional[
     except Exception as e:
         _fail(str(e))
 
+    providers: List[ProviderStats]
     if provider:
         p = stats.get_provider(provider)
         if not p:
@@ -295,13 +297,13 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
         console.print()
         return
 
-    p = stats.get_provider(provider)
-    if not p:
+    target_provider = stats.get_provider(provider)
+    if not target_provider:
         _fail(f"Provider '{provider}' not found for '{stats.model_id}'.")
-    score = next((sb for sb in stats.score_providers(cfg) if sb.endpoint_id == p.endpoint_id), None)
+    score = next((sb for sb in stats.score_providers(cfg) if sb.endpoint_id == target_provider.endpoint_id), None)
 
     if json_output:
-        out = p.to_dict()
+        out = target_provider.to_dict()
         if score:
             out["score_evaluation"] = score.to_dict()
         click.echo(json.dumps(out, indent=2))
@@ -309,8 +311,8 @@ def cache_command(model: str, provider: Optional[str], json_output: bool, **kw):
 
     console.print()
     console.print(f"[bold cyan]Model:[/bold cyan] {stats.model_name} ({stats.model_id})")
-    console.print(f"[bold cyan]Provider:[/bold cyan] {p.name} ({p.slug}, {p.quantization})")
-    console.print(f"[bold cyan]24h Published Cache Hit:[/bold cyan] {_color_hit_rate(p.cache_hit_rate_pct)}")
+    console.print(f"[bold cyan]Provider:[/bold cyan] {target_provider.name} ({target_provider.slug}, {target_provider.quantization})")
+    console.print(f"[bold cyan]24h Published Cache Hit:[/bold cyan] {_color_hit_rate(target_provider.cache_hit_rate_pct)}")
     if score:
         console.print(
             f"[bold cyan]Expected Task Cost:[/bold cyan] [bold green]{score.formatted_task_cost}[/bold green] "

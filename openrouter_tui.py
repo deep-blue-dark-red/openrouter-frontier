@@ -16,10 +16,12 @@ Esc/Backspace back (Esc clears the search first), Ctrl-C quit.
 Runs in the alternate screen buffer so the normal terminal scrollback is untouched.
 """
 
+import atexit
 import os
 import re
 import select
 import shutil
+import signal
 import sys
 import termios
 import tty
@@ -39,6 +41,24 @@ from get_models import clean_str
 # ANSI helpers
 ALT_SCREEN_ON = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h"
 ALT_SCREEN_OFF = "\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"
+
+
+def _cleanup_terminal() -> None:
+    sys.stdout.write(ALT_SCREEN_OFF)
+    sys.stdout.flush()
+
+
+atexit.register(_cleanup_terminal)
+
+
+def _signal_handler(signum: int, frame: Any) -> None:
+    _cleanup_terminal()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _signal_handler)
 HOME = "\x1b[H"
 CLEAR_BELOW = "\x1b[J"
 RESET = "\x1b[0m"
@@ -100,7 +120,10 @@ def get_key() -> str:
     try:
         tty.setraw(fd)
         select.select([fd], [], [])
-        seq = os.read(fd, 1).decode("utf-8", errors="ignore")
+        raw = os.read(fd, 1)
+        if not raw:
+            raise EOFError("stdin closed")
+        seq = raw.decode("utf-8", errors="ignore")
         if seq == KEY_ESC:
             while select.select([fd], [], [], 0.02)[0]:
                 more = os.read(fd, 256).decode("utf-8", errors="ignore")
@@ -152,9 +175,9 @@ def navigate(key: str, idx: int, count: int, scroll: int, visible: int) -> Tuple
         orig = idx
         clicked = False
         for button, _, row, released in events:
-            if button >= 64 and (button - 64) % 4 == 0:  # wheel up, incl. modifier variants
+            if 64 <= button < 80 and (button - 64) % 4 == 0:  # wheel up, incl. modifier variants
                 idx = max(0, idx - WHEEL)
-            elif button >= 65 and (button - 65) % 4 == 0:  # wheel down
+            elif 65 <= button < 80 and (button - 65) % 4 == 0:  # wheel down
                 idx = min(last, idx + WHEEL)
             elif button == 0 and not released and TABLE_FIRST_ROW <= row < TABLE_FIRST_ROW + visible:
                 hit = scroll + (row - TABLE_FIRST_ROW)
@@ -217,6 +240,9 @@ PROVIDER_COLS = [
     Column("Turn Time", 9, ">"),
     Column("Task Time", 9, ">"),
     Column("Uptime", 7, ">"),
+    Column("Input $/M", 11, ">"),
+    Column("Output $/M", 11, ">"),
+    Column("Cache $/M", 11, ">"),
 ]
 
 
@@ -238,7 +264,10 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
         ("", "metric: "), (BADGE, metric),
     ], width - 1))
 
-    name_w = max([MODEL_NAME_MIN_W] + [len(m["name"]) for m in models])
+    if width < 120:
+        name_w = max(18, min(28, width // 4))
+    else:
+        name_w = min(max([MODEL_NAME_MIN_W] + [len(m["name"]) for m in models]), 50)
     cols = [MODEL_STATUS_COL, Column("Model Name", name_w), MODEL_ID_COL,
             Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
             Column("Input $/M", 12, ">"), Column("Output $/M", 11, ">"),
@@ -304,11 +333,13 @@ def draw_providers(model, scores, all_quants, idx, scroll, width, viewport) -> T
         end = min(len(active), scroll + visible)
         for i in range(scroll, end):
             s = active[i]
+            cache_p = _usd(s.read_price) if (s.has_cache or s.read_price < s.input_price) else "-"
             line = format_row(
                 [
                     s.provider_name[:16], s.formatted_task_cost, s.formatted_token_cost, s.formatted_failure_cost,
                     s.formatted_time_cost, s.formatted_cache_hit_rate, fmt_seconds(s.ttft_seconds),
                     fmt_tps(s.throughput_tps), s.formatted_turn_time, s.formatted_task_time, fmt_pct(s.uptime_pct),
+                    _usd(s.input_price), _usd(s.out_price), cache_p,
                 ],
                 PROVIDER_COLS,
             )[: width - 1]
@@ -370,10 +401,13 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     row("time/M:", time_m, "(decode + prefill + overhead)", indent=4)
     row("failure/M:", fail_m, f"(uptime {fmt_pct(s.uptime_pct)})", indent=4)
     row("fixed (new tok + output):", _usd(s.fixed_cost_usd), indent=4)
-    row("time:", _usd(s.time_cost_usd),
+    time_note = (
+        f"(gen {_usd(s.decode_cost_usd)}, prefill {_usd(s.prefill_new_cost_usd)}, miss {_usd(s.prefill_miss_cost_usd)})"
+        if width < 110 else
         f"(gen {_usd(s.decode_cost_usd)}, prefill new tokens {_usd(s.prefill_new_cost_usd)}, "
-        f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})",
-        indent=4)
+        f"re-prefill on cache miss {_usd(s.prefill_miss_cost_usd)}, overhead {_usd(s.ttft_cost_usd)})"
+    )
+    row("time:", _usd(s.time_cost_usd), time_note, indent=4)
     row("cached-read baseline:", _usd(s.read_baseline_usd), indent=4)
     row("cache-miss premium:", _usd(s.miss_premium_usd), indent=4)
     row("failure premium + return:", _usd(s.failure_cost_usd), indent=4)
@@ -384,21 +418,21 @@ def draw_detail(s: ScoreBreakdown, model_id: str, width: int) -> None:
     # value column = one past the longest (indent + label) prefix, so every value lines up
     value_col = max(len(" " * indent + label) for indent, label, _, _ in rows) + 2
 
-    write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})")
-    write(rule)
-    write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}")
+    write(f"\x1b[1;36mProvider Detail: {s.provider_name}{RESET}  (for {model_id})"[: width - 1])
+    write(rule[: width - 1])
+    write(f"  Task: {s.turns} turns × ({s.new_tokens} new + {s.completion_tokens} out tokens), routing {s.routing}"[: width - 1])
     write(f"  per 1M token:  input/M: ${s.input_price:.4f}  |  output/M: ${s.out_price:.4f}  |  "
-          f"cache/M: ${s.read_price:.4f}  |  weighted/M: {weighted_m}")
+          f"cache/M: ${s.read_price:.4f}  |  weighted/M: {weighted_m}"[: width - 1])
     for indent, label, value, note in rows:
         prefix = " " * indent + label
         line = prefix + " " * (value_col - len(prefix)) + value
         if note:
             line += f"  {note}"
-        write(line)
-    write(f"  Bounds: perfect cache {_usd(s.perfect_cache_cost_usd)}  |  cold cache {_usd(s.cold_cache_cost_usd)}")
-    write(f"  Risk: σ_proc {_usd(s.sigma_proc_usd)}  |  σ_par {_usd(s.sigma_par_usd)}  |  P(migrate to fallback) {s.migration_probability:.0%}")
-    write(f"  E[TTFT]: {fmt_seconds(s.ttft_seconds)}  |  Throughput p50: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}")
-    write(rule)
+        write(line[: width - 1])
+    write(f"  Bounds: perfect cache {_usd(s.perfect_cache_cost_usd)}  |  cold cache {_usd(s.cold_cache_cost_usd)}"[: width - 1])
+    write(f"  Risk: σ_proc {_usd(s.sigma_proc_usd)}  |  σ_par {_usd(s.sigma_par_usd)}  |  P(migrate to fallback) {s.migration_probability:.0%}"[: width - 1])
+    write(f"  E[TTFT]: {fmt_seconds(s.ttft_seconds)}  |  Throughput p50: {fmt_tps(s.throughput_tps, ' TPS')}  |  Uptime: {fmt_pct(s.uptime_pct)}"[: width - 1])
+    write(rule[: width - 1])
     write(help_line([("Any key", "back to providers")], width - 1))
     sys.stdout.flush()
 
@@ -413,7 +447,7 @@ def run_tui() -> None:
     query = ""
     m_idx = m_scroll = 0
     selected: Optional[Dict[str, Any]] = None
-    scores: List[ScoreBreakdown] = []
+    scores: Optional[List[ScoreBreakdown]] = None
     active: List[ScoreBreakdown] = []
     p_idx = p_scroll = 0
     all_quants = False
@@ -431,13 +465,13 @@ def run_tui() -> None:
                 if new_idx is not None:
                     m_idx = new_idx
                     if clicked and filtered:
-                        selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
+                        selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", None, 0, 0
                 elif key == "\t":
                     metric = "coding" if metric == "intelligence" else "intelligence"
                     models, frontier_count = build_model_list(metric)
                     m_idx = m_scroll = 0
                 elif key in KEYS_ENTER and filtered:
-                    selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", [], 0, 0
+                    selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", None, 0, 0
                 elif key in (KEY_ESC, KEY_CTRL_C):
                     if query and key == KEY_ESC:
                         query, m_idx = "", 0
@@ -451,7 +485,7 @@ def run_tui() -> None:
 
             elif view == "PROVIDERS":
                 assert selected is not None
-                if not scores:
+                if scores is None:
                     clear_screen()
                     write(f"Fetching provider analytics for {selected['id']}...")
                     sys.stdout.flush()
@@ -465,7 +499,7 @@ def run_tui() -> None:
                         write(help_line([("Any key", "back to models")], width - 1))
                         sys.stdout.flush()
                         get_key()
-                        view, scores = "MODELS", []
+                        view, scores = "MODELS", None
                         continue
                 active, p_idx, p_scroll = draw_providers(selected, scores, all_quants, p_idx, p_scroll, width, viewport)
                 key = get_key()
@@ -478,7 +512,7 @@ def run_tui() -> None:
                     all_quants = not all_quants
                     p_idx = p_scroll = 0
                 elif key in (KEY_ESC, "q", "Q", "\x1b[D", "\x1bOD") or key in KEYS_BACKSPACE:
-                    view, scores = "MODELS", []
+                    view, scores = "MODELS", None
                 elif key in KEYS_ENTER and active:
                     view = "DETAIL"
                 elif key == KEY_CTRL_C:
@@ -496,9 +530,12 @@ def run_tui() -> None:
 
 
 def main() -> None:
+    if not sys.stdin.isatty():
+        sys.stderr.write("Error: openrouter-tui requires an interactive terminal.\n")
+        sys.exit(1)
     try:
         run_tui()
-    except (KeyboardInterrupt, SystemExit):
+    except (KeyboardInterrupt, SystemExit, EOFError):
         pass
 
 

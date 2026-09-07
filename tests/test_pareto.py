@@ -48,3 +48,38 @@ def test_frontier_needs_three_points_for_efficient_point():
     frontier, efficient = cost_quality_frontier([{"id": "a", "cost": 1, "score": 1}, {"id": "b", "cost": 2, "score": 2}])
     assert len(frontier) == 2 and efficient is None
     assert cost_quality_frontier([]) == ([], None)
+
+
+def test_collinear_and_convex_frontier_no_false_knee():
+    # Collinear: all points lie on the chord, gain = 0 for all interior points
+    collinear = [
+        {"id": "a", "cost": 1.0, "score": 10.0},
+        {"id": "b", "cost": 2.0, "score": 20.0},
+        {"id": "c", "cost": 3.0, "score": 30.0},
+    ]
+    _, efficient = cost_quality_frontier(collinear)
+    assert efficient is None
+
+    # Convex (sublinear returns): interior points lie below the chord
+    convex = [
+        {"id": "a", "cost": 1.0, "score": 10.0},
+        {"id": "b", "cost": 2.0, "score": 15.0},
+        {"id": "c", "cost": 3.0, "score": 30.0},
+    ]
+    _, efficient_convex = cost_quality_frontier(convex)
+    assert efficient_convex is None
+
+
+def test_nan_values_never_dominate():
+    # Item with NaN speed is dominated by valid item of equal cost
+    nan_item = Item(2.0, float("nan"))
+    valid_item = Item(2.0, 100.0)
+    mask = pareto_mask([nan_item, valid_item], OBJECTIVES)
+    assert mask == [False, True]
+
+    # Cheaper item with NaN speed must not dominate a valid item with speed
+    cheaper_nan = Item(1.0, float("nan"))
+    mask2 = pareto_mask([cheaper_nan, valid_item], OBJECTIVES)
+    assert mask2[1] is True  # valid_item remains on frontier
+
+

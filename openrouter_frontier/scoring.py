@@ -188,8 +188,14 @@ class EndpointPricing:
         completion = price_per_million(p.get("completion")) or 0.0
         read = price_per_million(p.get("input_cache_read"))
         write = price_per_million(p.get("input_cache_write"))
-        request_fee = float(p.get("request") or 0.0)
-        discount = float(p.get("discount") or 0.0)
+        try:
+            request_fee = float(p.get("request") or 0.0)
+        except (ValueError, TypeError):
+            request_fee = 0.0
+        try:
+            discount = float(p.get("discount") or 0.0)
+        except (ValueError, TypeError):
+            discount = 0.0
 
         # Some upstream entries publish write < read (e.g. gemini-3.8-flash @ AI Studio).
         # A cache write can never be cheaper than a read; clamping keeps miss/failure
@@ -220,13 +226,15 @@ class EndpointPricing:
         """w ($/M): cache write, or the input price when unpublished / no cache."""
         if not self.has_cache:
             return self.prompt
-        return self.input_cache_write if self.input_cache_write is not None else self.prompt
+        w = self.input_cache_write if self.input_cache_write is not None else self.prompt
+        return max(w, self.read_price)
 
     def miss_price(self, policy: str) -> float:
         """m ($/M): what an uncached prefix token costs on a miss under ``policy``."""
         if not self.has_cache:
             return self.prompt
-        return self.write_price if policy == "rewrite" else self.prompt
+        m = self.write_price if policy == "rewrite" else self.prompt
+        return max(m, self.read_price)
 
 
 # ----------------------------------------------------------------------------- telemetry
@@ -365,6 +373,7 @@ class ScoreBreakdown:
 
     quantization: str = "unknown"
     rank: int = 0
+    has_cache: bool = False
 
     # -- convenience views
 
@@ -719,9 +728,12 @@ def evaluate_endpoint(
         ttft_p50=ttft_seconds, tps_p50=throughput_tps,
     )
     A = _resolve(pricing, inp, cfg)
-    B = _resolve(fallback_pricing, fallback_inputs, cfg) if fallback_pricing is not None else A
-    if fallback_pricing is None and fallback_inputs is not None:
+    if fallback_pricing is not None:
+        B = _resolve(fallback_pricing, fallback_inputs or inp, cfg)
+    elif fallback_inputs is not None:
         B = _resolve(pricing, fallback_inputs, cfg)
+    else:
+        B = A
 
     acc = _run(A, B, cfg)
     perfect = _run(A, B, cfg, h_override=1.0).total
@@ -735,7 +747,7 @@ def evaluate_endpoint(
         provider_name=provider_name, provider_slug=provider_slug, endpoint_id=endpoint_id,
         input_price=pricing.prompt, read_price=pricing.read_price, write_price=pricing.write_price,
         miss_price=pricing.miss_price(cfg.miss_policy), out_price=pricing.completion,
-        request_fee=pricing.request_fee,
+        request_fee=pricing.request_fee, has_cache=pricing.has_cache,
         cache_hit_rate=A.h, uptime_pct=inp.uptime_pct,
         ttft_seconds=inp.expected_ttft, seconds_per_token=inp.expected_seconds_per_token,
         prefill_tps=(cfg.prefill_multiplier * inp.tps_p50) if inp.tps_p50 else None,

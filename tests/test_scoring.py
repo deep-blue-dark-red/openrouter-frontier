@@ -216,3 +216,27 @@ def test_price_per_million_is_strict_per_token_conversion():
     assert math.isclose(price_per_million("0.000000075"), 0.075)
     assert math.isclose(price_per_million("0.000000000005"), 0.000005)
     assert price_per_million(None) is None and price_per_million("abc") is None
+
+
+def test_write_clamped_to_read_when_write_is_cheaper():
+    # When explicit write is cheaper than read
+    p1 = EndpointPricing(prompt=0.5, completion=1.0, input_cache_read=0.2, input_cache_write=0.1)
+    assert p1.write_price == 0.2
+    assert p1.miss_price("rewrite") == 0.2
+
+    # When write is omitted and prompt is cheaper than read
+    p2 = EndpointPricing(prompt=0.075, completion=0.2, input_cache_read=0.1, input_cache_write=None)
+    assert p2.write_price == 0.1
+    assert p2.miss_price("rewrite") == 0.1
+
+    sb = evaluate_endpoint(p2, EndpointInputs(cache_hit_rate=0.5))
+    assert sb.miss_premium_usd >= 0.0
+
+
+def test_evaluate_endpoint_fallback_pricing_without_inputs():
+    primary = EndpointPricing(prompt=0.1, completion=0.2)
+    fallback = EndpointPricing(prompt=0.5, completion=1.0)
+    # Must not raise AttributeError when fallback_inputs is omitted
+    sb = evaluate_endpoint(primary, fallback_pricing=fallback)
+    assert sb.task_cost_usd > 0.0
+

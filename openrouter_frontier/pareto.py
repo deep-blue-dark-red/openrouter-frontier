@@ -9,6 +9,7 @@ Two flavours are provided:
   plus efficient point detection and vertical distance-to-frontier for dominated items.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
@@ -32,7 +33,7 @@ class Objective:
 
     def value(self, item: Any) -> float:
         v = self.key(item)
-        if v is not None:
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
             return float(v)
         if self.missing is not None:
             return self.missing
@@ -81,14 +82,25 @@ def cost_quality_frontier(
     The efficient point is the frontier point that maximises ``norm_score - norm_cost``, where both
     axes are min-max normalised to [0, 1] over the frontier. Geometrically that is the point
     furthest above the chord joining the cheapest and the highest-scoring frontier items,
-    i.e. the best marginal quality gained per dollar. An efficient point requires at least 3 points.
+    i.e. the best marginal quality gained per dollar. An efficient point requires at least 3 points
+    and must be strictly above the chord (gain > 0).
 
     :return: ``(frontier_items, efficient_index_into_frontier)``
     """
     if not candidates:
         return [], None
 
-    ordered = sorted(candidates, key=lambda x: (x[cost_key], -x[score_key]))
+    valid = [
+        c for c in candidates
+        if c.get(cost_key) is not None
+        and c.get(score_key) is not None
+        and not (isinstance(c[cost_key], float) and math.isnan(c[cost_key]))
+        and not (isinstance(c[score_key], float) and math.isnan(c[score_key]))
+    ]
+    if not valid:
+        return [], None
+
+    ordered = sorted(valid, key=lambda x: (x[cost_key], -x[score_key]))
     frontier: List[Dict[str, Any]] = []
     best_score = float("-inf")
     for item in ordered:
@@ -102,8 +114,9 @@ def cost_quality_frontier(
         min_score, max_score = frontier[0][score_key], frontier[-1][score_key]
         cost_range = (max_cost - min_cost) or 1.0
         score_range = (max_score - min_score) or 1.0
-        best_gain = float("-inf")
-        for i, item in enumerate(frontier):
+        best_gain = 0.0
+        for i in range(1, len(frontier) - 1):
+            item = frontier[i]
             gain = (item[score_key] - min_score) / score_range - (item[cost_key] - min_cost) / cost_range
             if gain > best_gain:
                 best_gain, efficient_idx = gain, i
