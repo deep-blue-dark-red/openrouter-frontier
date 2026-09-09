@@ -1,0 +1,11 @@
+{
+  "owner": "polyglot-ci",
+  "source_repository": "mcp/polyglot-ci",
+  "sha256": {
+    ".forgejo/polyglot-ci/pipeline.py": "18d420953005db7739b02e25cdf65c96e24ce04dc65afc307529e108f6538152",
+    ".forgejo/polyglot-ci/toolchains.py": "7415f44f50d6879c8c593a77c6677d09fdc95fd6e4fc11c939aa634819dc660f",
+    ".forgejo/polyglot-ci/archive.py": "771dd4b86974c65c6cca789c224618d1e50bdc8988660d0cd839d2b8ea7199d8",
+    ".forgejo/polyglot-ci/README.md": "ca8a114ac1fe5c4e61ccb0feb19a77d9c659b35669a23b5bf1e5ba8b552396e3",
+    ".forgejo/workflows/polyglot-ci.yml": "30fc716c0f8d43b2e09bdea771d684ae36378011df6b5d80b0069ac301c01de2"
+  }
+}

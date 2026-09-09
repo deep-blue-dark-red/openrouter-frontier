@@ -1,0 +1,55 @@
+name: Build, test, benchmark
+on:
+  push:
+  workflow_dispatch:
+
+# This is a host runner: only trusted repository pushes and manual runs execute.
+concurrency:
+  group: polyglot-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: commons-ci
+    timeout-minutes: 180
+    env:
+      CI: 'true'
+      XDG_CACHE_HOME: /mnt/commons/git-ci/polyglot/cache
+      UV_CACHE_DIR: /mnt/commons/git-ci/polyglot/cache/uv
+      PIP_CACHE_DIR: /mnt/commons/git-ci/polyglot/cache/pip
+      NUGET_PACKAGES: /mnt/commons/git-ci/polyglot/cache/nuget
+      DOTNET_CLI_HOME: /mnt/commons/git-ci/polyglot/cache/dotnet-home
+      CARGO_HOME: /mnt/commons/git-ci/polyglot/cache/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      ZIG_GLOBAL_CACHE_DIR: /mnt/commons/git-ci/polyglot/cache/zig
+      npm_config_cache: /mnt/commons/git-ci/polyglot/cache/npm
+      GOMODCACHE: /mnt/commons/git-ci/polyglot/cache/go-mod
+      GOCACHE: /mnt/commons/git-ci/polyglot/cache/go-build
+      TMPDIR: /mnt/commons/git-ci/polyglot/tmp
+    steps:
+      - name: Verify external workspace storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_WORKSPACE" in
+            /mnt/commons/git-ci/polyglot/*) ;;
+            *) echo 'Runner workdir_parent must be /mnt/commons/git-ci/polyglot/work before CI runs'; exit 1 ;;
+          esac
+          test -w /mnt/commons/git-ci/polyglot
+          mkdir -p "$TMPDIR" /mnt/commons/git-ci/polyglot/locks
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Discover build systems
+        run: python3 .forgejo/polyglot-ci/pipeline.py discover
+      - name: Prepare declared toolchains
+        run: flock /mnt/commons/git-ci/polyglot/locks/pipeline.lock python3 .forgejo/polyglot-ci/toolchains.py
+      - name: Compile
+        run: flock /mnt/commons/git-ci/polyglot/locks/pipeline.lock python3 .forgejo/polyglot-ci/pipeline.py build
+      - name: Run detected tests
+        run: flock /mnt/commons/git-ci/polyglot/locks/pipeline.lock python3 .forgejo/polyglot-ci/pipeline.py test
+      - name: Run detected benchmarks
+        run: flock /mnt/commons/git-ci/polyglot/locks/pipeline.lock python3 .forgejo/polyglot-ci/pipeline.py benchmark
+      - name: Preserve reports on external storage
+        if: always()
+        run: python3 .forgejo/polyglot-ci/archive.py
