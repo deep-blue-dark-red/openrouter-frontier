@@ -27,7 +27,6 @@ An unsupported project or a documentation-only repository reports skipped stages
 not a passed test suite. A detected failing command never falls back to another
 runner. VSTest must produce a TRX with executed tests. pytest's nonzero no-tests
 exit and MTP's no-tests failure are preserved.
-
 ## Repository contract
 
 Most repositories need only the managed workflow and vendored runner files.
@@ -57,7 +56,9 @@ For automatic adapters, list a kind/root pair without commands. The dotnet
 adapter additionally needs `targets`; the Python adapter needs `files` if using
 explicit project selection. `exclude` adds glob exclusions to automatic discovery.
 `toolchains.dotnet` accepts exact SDK versions; `toolchains.zig` accepts an exact
-Zig version. Normal .NET global.json roll-forward policies are honored by the
+Zig version; `toolchains.node` and `toolchains.go` accept exact versions, with
+the current Node.js LTS and Go release provisioned automatically when the host
+lacks `npm` or `go`. Normal .NET global.json roll-forward policies are honored by the
 installed SDK selection; an unavailable pinned SDK fails preparation.
 
 Arbitrary benchmark scripts are reported as unresolved with their paths. They

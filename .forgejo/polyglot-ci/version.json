@@ -3,9 +3,9 @@
   "source_repository": "mcp/polyglot-ci",
   "sha256": {
     ".forgejo/polyglot-ci/pipeline.py": "18d420953005db7739b02e25cdf65c96e24ce04dc65afc307529e108f6538152",
-    ".forgejo/polyglot-ci/toolchains.py": "7415f44f50d6879c8c593a77c6677d09fdc95fd6e4fc11c939aa634819dc660f",
+    ".forgejo/polyglot-ci/toolchains.py": "fdea8c08404e44d19ee31648fa8178b9c21e5b37384eb9ed85ba13dcf091dff4",
     ".forgejo/polyglot-ci/archive.py": "771dd4b86974c65c6cca789c224618d1e50bdc8988660d0cd839d2b8ea7199d8",
-    ".forgejo/polyglot-ci/README.md": "ca8a114ac1fe5c4e61ccb0feb19a77d9c659b35669a23b5bf1e5ba8b552396e3",
+    ".forgejo/polyglot-ci/README.md": "ed70e4c55c3149c1358e38e37943e3a1c9c773091a828a1c0d0c9d7b2637b8b6",
     ".forgejo/workflows/polyglot-ci.yml": "30fc716c0f8d43b2e09bdea771d684ae36378011df6b5d80b0069ac301c01de2"
   }
 }

@@ -3,10 +3,12 @@
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
 import pipeline
 
@@ -15,7 +17,13 @@ def run(argv):
     logfile = Path.cwd() / '.polyglot-ci-work/toolchains.log'
     with logfile.open('a') as log:
         log.write('+ ' + ' '.join(argv) + '\n'); log.flush()
-        result = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, timeout=1800)
+        try: result = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, timeout=1800)
+        except subprocess.TimeoutExpired:
+            log.write('\nToolchain command timed out.\n')
+            raise RuntimeError('Toolchain command timed out: ' + ' '.join(argv)) from None
+        except OSError as error:
+            log.write(str(error) + '\n')
+            raise RuntimeError(f'Cannot execute {argv[0]}: {error}') from error
     if result.returncode:
         print(logfile.read_text(errors='replace')[-16000:], flush=True)
         raise RuntimeError('Toolchain preparation failed; see toolchains.log')
@@ -23,6 +31,77 @@ def run(argv):
 def expose(path):
     os.environ['PATH'] = str(path) + os.pathsep + os.environ['PATH']
     with open(os.environ['GITHUB_PATH'], 'a') as f: f.write(str(path) + '\n')
+
+def machine_tag(machine=None):
+    machine = machine or platform.machine()
+    if machine in ('x86_64', 'amd64'): return {'node': 'x64', 'go': 'amd64'}
+    if machine in ('aarch64', 'arm64'): return {'node': 'arm64', 'go': 'arm64'}
+    raise RuntimeError('Unsupported CPU architecture: ' + machine)
+
+def fetch(url, target):
+    with urllib.request.urlopen(url, timeout=300) as response, target.open('wb') as file:
+        shutil.copyfileobj(response, file)
+
+def unpack(archive, destination):
+    with tarfile.open(archive) as bundle:
+        try: bundle.extractall(destination, filter='data')
+        except TypeError: bundle.extractall(destination)
+
+def node_index():
+    with urllib.request.urlopen('https://nodejs.org/dist/index.json', timeout=60) as response:
+        return json.load(response)
+
+def resolve_node(wanted, entries=None):
+    entries = entries if entries is not None else node_index()
+    if wanted:
+        for entry in entries:
+            if entry['version'] == 'v' + wanted or entry['version'].startswith('v' + wanted + '.'): return entry['version'][1:]
+        raise RuntimeError('No Node.js release matches ' + wanted)
+    return next(entry['version'][1:] for entry in entries if entry.get('lts'))
+
+def ensure_node(tools, config):
+    if shutil.which('npm'): return run(['npm', '--version'])
+    version = resolve_node(config.get('node'))
+    directory = tools / ('node-v' + version)
+    if not (directory / 'bin/npm').exists():
+        tag = machine_tag()['node']
+        archive = tools / 'node.tar.gz'
+        fetch(f'https://nodejs.org/dist/v{version}/node-v{version}-linux-{tag}.tar.gz', archive)
+        staging = tools / ('.node-stage-' + version)
+        shutil.rmtree(staging, ignore_errors=True); staging.mkdir(parents=True)
+        unpack(archive, staging)
+        shutil.rmtree(directory, ignore_errors=True)
+        (staging / ('node-v' + version)).replace(directory)
+        shutil.rmtree(staging); archive.unlink()
+    expose(directory / 'bin')
+    run([str(directory / 'bin/node'), '--version'])
+    run([str(directory / 'bin/npm'), '--version'])
+
+def go_index():
+    with urllib.request.urlopen('https://go.dev/dl/?mode=json', timeout=60) as response:
+        return json.load(response)
+
+def resolve_go(wanted, entries=None):
+    if wanted: return wanted.lstrip('go')
+    entries = entries if entries is not None else go_index()
+    return entries[0]['version'].lstrip('go')
+
+def ensure_go(tools, config):
+    if shutil.which('go'): return run(['go', 'version'])
+    version = resolve_go(config.get('go'))
+    directory = tools / ('go-' + version)
+    if not (directory / 'bin/go').exists():
+        tag = machine_tag()['go']
+        archive = tools / 'go.tar.gz'
+        fetch(f'https://go.dev/dl/go{version}.linux-{tag}.tar.gz', archive)
+        staging = tools / ('.go-stage-' + version)
+        shutil.rmtree(staging, ignore_errors=True); staging.mkdir(parents=True)
+        unpack(archive, staging)
+        shutil.rmtree(directory, ignore_errors=True)
+        (staging / 'go').replace(directory)
+        shutil.rmtree(staging); archive.unlink()
+    expose(directory / 'bin')
+    run([str(directory / 'bin/go'), 'version'])
 
 def main():
     root = Path.cwd()
@@ -89,7 +168,7 @@ def main():
     if 'rust' in kinds:
         if Path('/usr/local/cargo/bin').exists(): expose(Path('/usr/local/cargo/bin'))
         run(['cargo','--version'])
-    if 'go' in kinds: run(['go','version'])
-    if 'node' in kinds: run(['node','--version'])
+    if 'go' in kinds: ensure_go(tools, config)
+    if 'node' in kinds: ensure_node(tools, config)
 
 if __name__=='__main__': main()
