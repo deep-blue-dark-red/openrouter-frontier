@@ -70,8 +70,10 @@ def ensure_node(tools, config):
         staging = tools / ('.node-stage-' + version)
         shutil.rmtree(staging, ignore_errors=True); staging.mkdir(parents=True)
         unpack(archive, staging)
+        extracted = [child for child in staging.iterdir() if child.is_dir()]
+        if len(extracted) != 1: raise RuntimeError('Unexpected Node.js archive layout')
         shutil.rmtree(directory, ignore_errors=True)
-        (staging / ('node-v' + version)).replace(directory)
+        extracted[0].replace(directory)
         shutil.rmtree(staging); archive.unlink()
     expose(directory / 'bin')
     run([str(directory / 'bin/node'), '--version'])
