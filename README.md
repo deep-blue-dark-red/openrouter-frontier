@@ -68,8 +68,8 @@ All tools accept fuzzy model names: `zai/glm-5.3-flsh`, `z.ai/glm-5.3-flash`, an
   frontier models first from cheapest up, then dominated models by their gap to the frontier.
   `★ OPTIMAL` marks frontier models, `★ EFFICIENT` the frontier's efficient point (best quality
   gain per dollar), and `-N pts` a dominated model's score gap. Type to filter (`zai`,
-  `claude37`, `gemini25` all work; punctuation is ignored). **Tab** switches between the
-  intelligence and coding index; the active metric is shown in the status line.
+  `claude37`, `gemini25` all work; punctuation is ignored). **Tab** cycles the
+  intelligence, coding and agentic index; the active metric is shown in the status line.
 - **Providers view** – **Enter** on a model ranks its endpoints by ProviderScore expected
   task cost. **Tab** or **a** toggles between the primary quantization and all variants.
 - **Detail view** – **Enter** on a provider shows the task-cost decomposition (fixed, time,

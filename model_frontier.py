@@ -6,6 +6,10 @@ or agentic); cost from the live catalog list price, the traffic-weighted effecti
 estimated per-call cost. Models are on the frontier when no cheaper model scores as high. The
 efficient point is the frontier model with the best normalised quality gain per dollar.
 
+With OPENROUTER_API_KEY (or OPEN_ROUTER_KEY) set in the environment, benchmarks come from the
+authorized GET /api/v1/benchmarks endpoint — the same unified rankings dotopenrouter-cli
+benchmarks uses; without a key it falls back to the public frontend rankings.
+
 Usage:
   ./model_frontier.py
   ./model_frontier.py --metric coding --top 40
@@ -17,6 +21,8 @@ Usage:
 import argparse
 import concurrent.futures
 import json
+import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import _bootstrap  # noqa: F401
@@ -31,8 +37,22 @@ from openrouter_frontier.resolver import MODELS_CACHE_FILE, get_all_models
 force_ipv4()
 
 BENCHMARKS_URL = "https://openrouter.ai/api/frontend/v1/rankings/benchmarks"
+# Authorized endpoint (same data dotopenrouter-cli benchmarks uses): one unified row per
+# model carrying intelligence_index / coding_index / agentic_index instead of per-metric lists.
+BENCHMARKS_API_URL = "https://openrouter.ai/api/v1/benchmarks"
 BENCHMARKS_CACHE_FILE = CACHE_DIR / "frontend_benchmarks.json"
 CACHE_TTL = 3600  # benchmark rankings change rarely
+
+# aaData metric -> intelligence_index / coding_index / agentic_index field on the unified rows
+API_V1_INDEX_FIELDS = {
+    "intelligence": "intelligence_index",
+    "coding": "coding_index",
+    "agentic": "agentic_index",
+}
+
+
+def _api_key() -> Optional[str]:
+    return os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPEN_ROUTER_KEY")
 
 METRIC_ALIASES = {
     "intelligence": "intelligence", "intel": "intelligence",
@@ -50,7 +70,40 @@ def strip_date_suffix(slug: str) -> str:
     return base if base and tail.isdigit() and len(tail) == 8 else slug
 
 
+def _fetch_authorized_benchmarks() -> Dict[str, Any]:
+    """GET /api/v1/benchmarks with the env key, reshaped into the aaData form.
+
+    The unified response carries one row per model per source with iq/code/agent index
+    columns; we keep the artificial-analysis rows and explode each non-null index into the
+    per-metric lists the frontend rankings shape uses, so downstream parsing is unchanged.
+    """
+    resp = _session.get(
+        BENCHMARKS_API_URL, headers={"Authorization": f"Bearer {_api_key()}"}, timeout=10,
+    )
+    resp.raise_for_status()
+    aa: Dict[str, List[Dict[str, Any]]] = {metric: [] for metric in API_V1_INDEX_FIELDS}
+    for e in resp.json().get("data", []):
+        if e.get("source") != "artificial-analysis":
+            continue
+        base = {
+            "uid": e.get("model_permaslug"),
+            "permaslug": e.get("model_permaslug"),
+            "aa_name": e.get("display_name"),
+        }
+        for metric, field in API_V1_INDEX_FIELDS.items():
+            score = e.get(field)
+            if score is not None:
+                aa[metric].append({**base, "score": score})
+    return {"aaData": aa, "benchSource": "api_v1"}
+
+
 def _fetch_benchmarks() -> Dict[str, Any]:
+    """Authorized /api/v1/benchmarks when a key is set, else the public frontend rankings."""
+    if _api_key():
+        try:
+            return _fetch_authorized_benchmarks()
+        except Exception as e:
+            print(f"warning: authorized benchmarks failed ({e}); using public rankings", file=sys.stderr)
     resp = _session.get(BENCHMARKS_URL, timeout=10)
     resp.raise_for_status()
     return resp.json().get("data", {})
@@ -153,6 +206,10 @@ def build_candidates(
         if price_source == "list":
             if cat and cat["prompt_per_m"] > 0:
                 cost, unit = cat["prompt_per_m"], "$/1M prompt"
+        elif price_source == "blend" and cat:
+            bp = blended_price(cat["prompt_per_m"], cat["cache_read_per_m"], cat["completion_per_m"])
+            if bp is not None and bp > 0:
+                cost, unit = bp, "$/1M blended"
         elif price_source == "weighted":
             wp = weighted_prices.get(permaslug) or weighted_prices.get(base_id)
             if wp is not None and wp > 0:
@@ -194,8 +251,8 @@ def main() -> None:
     )
     parser.add_argument("--metric", choices=["intelligence", "coding", "agentic"], default="intelligence")
     parser.add_argument(
-        "--price-source", choices=["list", "weighted", "call"], default="list",
-        help="list = catalog prompt $/1M; weighted = traffic-weighted effective prompt $/1M; call = per-call estimate",
+        "--price-source", choices=["list", "blend", "weighted", "call"], default="list",
+        help="list = catalog prompt $/1M; blend = 80/20 in/out blended $/1M; weighted = traffic-weighted effective prompt $/1M; call = per-call estimate",
     )
     parser.add_argument("-c", "--prompt-tokens", type=int, default=1000, help="Prompt tokens for --price-source call")
     parser.add_argument("-o", "--completion-tokens", type=int, default=1000, help="Completion tokens for --price-source call")

@@ -4,8 +4,8 @@
 Views:
   1. Models     - the catalog ranked by the cost vs. quality Pareto frontier (frontier models
                   first, cheapest to most expensive, with the knee point highlighted; then dominated
-                  models by distance to the frontier). Type to fuzzy-filter; Tab toggles the
-                  benchmark metric between intelligence and coding.
+                  models by distance to the frontier). Type to fuzzy-filter; Tab cycles the
+                  benchmark metric between intelligence, coding and agentic.
   2. Providers  - Enter on a model lists its endpoints ranked by ProviderScore scored cost.
                   Tab or 'a' toggles between the primary quantization and all variants.
   3. Detail     - Enter on a provider shows the full cost breakdown and pricing.
@@ -85,6 +85,9 @@ WHEEL = 1  # mouse wheel scroll step
 TABLE_FIRST_ROW = 4  # 1-based terminal row of the first data row (bar, header, rule above it)
 MODEL_NAME_MIN_W = 32  # Model Name column never shrinks below this
 
+METRICS = ("intelligence", "coding", "agentic")  # Tab cycles through these
+METRIC_LABELS = {"intelligence": "Intel Score", "coding": "Coding Score", "agentic": "Agentic Score"}
+
 
 # ------------------------------------------------------------------ data
 
@@ -104,7 +107,7 @@ def matches_query(query: str, m: Dict[str, Any]) -> bool:
 def build_model_list(metric: str) -> Tuple[List[Dict[str, Any]], int]:
     """Benchmarked models sorted by frontier position; returns ``(models, frontier_size)``."""
     catalog, raw_bench = load_data()
-    candidates = build_candidates(catalog, raw_bench, metric, price_source="list")
+    candidates = build_candidates(catalog, raw_bench, metric, price_source="blend")
     frontier, efficient = cost_quality_frontier(candidates)
     annotate_frontier(candidates, frontier, efficient)
     candidates.sort(key=frontier_sort_key)
@@ -269,8 +272,8 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
     else:
         name_w = min(max([MODEL_NAME_MIN_W] + [len(m["name"]) for m in models]), 50)
     cols = [MODEL_STATUS_COL, Column("Model Name", name_w), MODEL_ID_COL,
-            Column("Intel Score" if metric == "intelligence" else "Coding Score", 12, ">"),
-            Column("Input $/M", 12, ">"), Column("Output $/M", 11, ">"),
+            Column(METRIC_LABELS.get(metric, "Score"), 12, ">"),
+            Column("Cost $/M", 12, ">"), Column("Output $/M", 11, ">"),
             Column("Cache $/M", 11, ">"), Column("Blend $/M", 11, ">")]
     head = header_line(cols)
     write(f"{BOLD}{head[:width - 1]}{RESET}")
@@ -302,7 +305,7 @@ def draw_models(models, query, metric, frontier_count, idx, scroll, width, viewp
         pad_rows(end - scroll, viewport)
 
     write()
-    write(help_line([("Enter", "providers"), ("Tab", "toggle metric"), ("↑/↓", "move"), ("Esc", "clear / exit")], width - 1))
+    write(help_line([("Enter", "providers"), ("Tab", "next metric"), ("↑/↓", "move"), ("Esc", "clear / exit")], width - 1))
     sys.stdout.write(styled([
         (BOLD_YELLOW, "★ OPTIMAL KNEE"), ("", " best quality gain per dollar   "),
         (GREEN, "★ OPTIMAL"), ("", " on the cost/quality frontier   "),
@@ -467,7 +470,7 @@ def run_tui() -> None:
                     if clicked and filtered:
                         selected, view, scores, p_idx, p_scroll = filtered[m_idx], "PROVIDERS", None, 0, 0
                 elif key == "\t":
-                    metric = "coding" if metric == "intelligence" else "intelligence"
+                    metric = METRICS[(METRICS.index(metric) + 1) % len(METRICS)]
                     models, frontier_count = build_model_list(metric)
                     m_idx = m_scroll = 0
                 elif key in KEYS_ENTER and filtered:

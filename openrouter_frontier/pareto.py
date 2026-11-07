@@ -103,10 +103,15 @@ def cost_quality_frontier(
     ordered = sorted(valid, key=lambda x: (x[cost_key], -x[score_key]))
     frontier: List[Dict[str, Any]] = []
     best_score = float("-inf")
+    best_cost = float("-inf")  # cheapest cost at which best_score was achieved
     for item in ordered:
         if item[score_key] > best_score:
             frontier.append(item)
             best_score = item[score_key]
+            best_cost = item[cost_key]
+        elif item[score_key] == best_score and item[cost_key] == best_cost:
+            # Exact tie on both axes: weak dominance does not eliminate it.
+            frontier.append(item)
 
     efficient_idx: Optional[int] = None
     if len(frontier) >= 3:

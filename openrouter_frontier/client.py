@@ -15,7 +15,7 @@ from .scoring import EndpointPricing, ScoreBreakdown, ScoringConfig
 force_ipv4()
 
 # Regexes for pulling data out of the Next.js RSC flight payload embedded in a model page.
-_RSC_CHUNK_RE = re.compile(r'self\.__next_f\.push\(\[\d+,"(.*)"\]\)')
+_RSC_CHUNK_RE = re.compile(r'self\.__next_f\.push\(\[\d+,"(.*?)"\]\)')
 _RSC_STATS_RE = re.compile(r'"stats":(\{[^}]+\})')
 _RSC_UPTIME_RE = re.compile(r'"([a-f0-9\-]{36})":\[(\{"date":[^\]]+\})\]')
 
